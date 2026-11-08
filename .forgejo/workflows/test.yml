@@ -1,0 +1,28 @@
+name: Test
+
+# Unit and static tests on every push and pull request. No secrets.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit and static tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PyYAML
+        run: python3 -m pip install --quiet 'PyYAML==6.0.3'
+
+      - name: Tests
+        run: python3 -m unittest discover -s tests -t . -v
