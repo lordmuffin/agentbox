@@ -1,0 +1,7 @@
+stage=0
+status=replanning
+persona=engineer
+kind=claude
+verify=make test
+base=origin/main
+bgwait=60

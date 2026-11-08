@@ -1,0 +1,6 @@
+stage=1
+status=running
+persona=engineer
+kind=codex
+verify=
+base=origin/main

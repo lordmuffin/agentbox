@@ -1,0 +1,6 @@
+stage=3
+status=exploded
+persona=engineer
+kind=claude
+verify=
+base=origin/main
