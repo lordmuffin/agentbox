@@ -1,7 +1,7 @@
-"""Offline unit tests for agentbox/resume.py: which herd plans the entrypoint resumes.
+"""Offline unit tests for resume.py: which herd plans the entrypoint resumes.
 
 Run with:
-    python3 -m unittest discover -s agentbox/tests -t .
+    python3 -m unittest discover -s tests -t .
 
 The fixtures under fixtures/ are static state and args files. Worktrees are
 built in a temp dir per test, because git refuses to track a file named .git.
@@ -17,7 +17,7 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from agentbox import resume
+import resume
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 STATES = FIXTURES / "states"

@@ -1,12 +1,13 @@
 # agentbox image: herdr + herd + Claude Code + tetherd, plus the tools the agents use.
-# docs/agentbox.md §Image. Built by .github/workflows/build-agentbox.yml on the
+# homelab-gitops docs/agentbox.md §Image. Built by .forgejo/workflows/build.yml on the
 # in-cluster buildkitd, which passes the Forgejo read token as a BuildKit secret:
 #
-#   buildctl build --frontend dockerfile.v0 --local context=agentbox --local dockerfile=agentbox \
+#   buildctl build --frontend dockerfile.v0 --local context=. --local dockerfile=. \
 #     --secret id=forgejo_read_token,src=<file> ...
 #
-# Pins (docs/agentbox.md §Decisions). Bump one here, then agentbox/VERSION and the
-# StatefulSet's image tag together; the workflow refuses to overwrite a tag.
+# Pins (homelab-gitops docs/agentbox.md §Decisions). Bump one here and VERSION
+# together; the workflow refuses to overwrite a tag. Then bump the StatefulSet's
+# image tag in homelab-gitops, once the new tag exists on GHCR.
 #
 # /home/agent is the PVC, so nothing the image provides lives there: tools go in
 # /usr/local and /opt, and first-run setup of $HOME is the entrypoint's job.
