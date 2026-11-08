@@ -102,11 +102,13 @@ start_tetherd() {
     log "tetherd not started: no Home Assistant token at $AGENTBOX_HA_TOKEN_FILE"; return 0
   fi
   export TETHER_HMAC_SECRET_FILE=$hmac TETHER_HA_TOKEN_FILE=$token
-  if [[ -n ${POD_IP:-} && -s $TETHER_PROXY_CLIENT_CA ]]; then
+  # A PEM, not just a non-empty file: the ConfigMap ships a one-line placeholder
+  # until the CA is pasted in (apps/services/agentbox/tether-proxy-ca-configmap.yaml).
+  if [[ -n ${POD_IP:-} ]] && grep -q -- '-----BEGIN CERTIFICATE-----' "$TETHER_PROXY_CLIENT_CA" 2>/dev/null; then
     export TETHER_PROXY_ADDR=$POD_IP:7443
   else
     unset TETHER_PROXY_ADDR
-    log "tetherd proxy listener off: needs POD_IP and $TETHER_PROXY_CLIENT_CA"
+    log "tetherd proxy listener off: needs POD_IP and a PEM certificate in $TETHER_PROXY_CLIENT_CA"
   fi
   tetherd serve </dev/null &
   tetherd_pid=$!
