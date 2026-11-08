@@ -27,7 +27,7 @@ ARG FJ_SHA256=6803c12eed17bfadb40ba95da2a6ab58f9b4a7dc10eabfe3512fce7e2fe6216f
 ARG KUBECTL_VERSION=1.36.2
 ARG KUBECTL_SHA256=1e9045ec32bea85da43de85f0065358529ea7c7a152eca78154fba5b58c27d82
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
+ && apt-get install -y --no-install-recommends ca-certificates curl libatomic1 xz-utils \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /dl
 RUN curl -fsSLo go.tgz "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \
@@ -82,10 +82,11 @@ RUN make install PREFIX=/usr/local DESTDIR=/out
 # --- the image.
 FROM debian:trixie-20261104-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 ARG CLAUDE_CODE_VERSION=2.1.319
-# bsdextrautils is util-linux's `column`, which herd needs; libssl3t64 and zlib1g are fj's.
+# bsdextrautils is util-linux's `column`, which herd needs; libssl3t64 and zlib1g are
+# fj's; libatomic1 is node's.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      bash bsdextrautils ca-certificates curl git jq libssl3t64 make openssh-client \
+      bash bsdextrautils ca-certificates curl git jq libatomic1 libssl3t64 make openssh-client \
       python3 ripgrep tmux util-linux zlib1g \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=toolchains /usr/local/go /usr/local/go
