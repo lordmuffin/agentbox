@@ -83,11 +83,15 @@ RUN make install PREFIX=/usr/local DESTDIR=/out
 FROM debian:trixie-20261104-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 ARG CLAUDE_CODE_VERSION=2.1.319
 # bsdextrautils is util-linux's `column`, which herd needs; libssl3t64 and zlib1g are
-# fj's; libatomic1 is node's.
+# fj's; libatomic1 is node's. openssh-server is for the PC's herdr (sshd as `agent`,
+# docs/agentbox.md §herdr machine). Its postinst generates host keys in /etc/ssh;
+# they are deleted, so no image ships a private key: the entrypoint makes the pod's
+# own on the home volume.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       bash bsdextrautils ca-certificates curl git jq libatomic1 libssl3t64 make openssh-client \
-      python3 ripgrep tmux util-linux zlib1g \
+      openssh-server python3 ripgrep tmux util-linux zlib1g \
+ && rm -f /etc/ssh/ssh_host_* \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=toolchains /usr/local/go /usr/local/go
 COPY --from=toolchains /opt/node /opt/node
@@ -113,7 +117,12 @@ RUN npm install -g --prefix /usr/local "@anthropic-ai/claude-code@${CLAUDE_CODE_
  && go version && node --version
 
 COPY --chmod=0755 entrypoint.sh resume.py resume-plan.sh agentbox-plan.sh /opt/agentbox/
-RUN ln -s /opt/agentbox/agentbox-plan.sh /usr/local/bin/agentbox-plan \
+# Root-owned and read-only for `agent`, so an agent can't loosen it. COPY --chmod also
+# gives the directory it creates 0644, which nobody can enter (sshd then can't read
+# the file, and the kubelet can't mount the authorized key under it), hence the chmod.
+COPY --chmod=0644 sshd_config /etc/agentbox/sshd_config
+RUN chmod 0755 /etc/agentbox \
+ && ln -s /opt/agentbox/agentbox-plan.sh /usr/local/bin/agentbox-plan \
  && groupadd -g 1000 agent \
  && useradd -u 1000 -g 1000 -d /home/agent -m -s /bin/bash agent
 USER 1000:1000
