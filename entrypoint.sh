@@ -3,13 +3,20 @@
 # in progress when the pod last stopped. docs/agentbox.md §Entrypoint.
 #
 # Start order:
-#   1. `herdr server` headless; wait until `herdr status` says running.
+#   1. `herdr server` headless, under setsid (saved SSH machines need a detached
+#      daemon); wait until `herdr status` says running.
 #   2. tetherd, configured entirely through TETHER_* env vars that hold URLs and
 #      file paths, never secrets. The two secret files are copied to a private
 #      0700 runtime dir at mode 0600 first: tetherd refuses a group-readable
 #      secret file, and a Kubernetes secret volume with fsGroup is group-readable.
 #      If a secret is missing, tetherd is not started and that is logged; the
 #      harness still runs.
+#   2b. sshd, for the PC's herdr (`herdr machine add agentbox`, docs/agentbox.md
+#      §herdr machine): as this user, on 127.0.0.1:2222 only, with
+#      /etc/agentbox/sshd_config. Its ed25519 host key is generated once on the
+#      home volume, so it survives restarts. A supervisor restarts sshd if it
+#      exits (10 s apart). Every line is "agentbox: sshd ...", sshd's own log
+#      included. sshd failing never stops the harness.
 #   3. No herdr Mobile Relay (docs/agentbox.md §Decisions, relay-in-pod: no).
 #   4. For each plan resume.py selects: get a pane in its worktree's workspace,
 #      `herdr agent start` the agent there (herd -R never starts one), then run
@@ -18,7 +25,7 @@
 #      "agentbox: resume failed <branch>: <why>" and that plan is not retried.
 #   5. SIGTERM/SIGINT: ^C each herd this script started (so no gate runs against
 #      an interrupted agent and burns the fix-up turn), Esc every plan's agent,
-#      stop tetherd (it denies pending approvals), `herdr server stop` (a clean
+#      stop sshd, stop tetherd (it denies pending approvals), `herdr server stop` (a clean
 #      stop keeps the workspaces for next time), wait up to
 #      AGENTBOX_STOP_TIMEOUT seconds, then kill what is left.
 #   6. Otherwise wait on the herdr server, so the container lives as long as it does.
@@ -33,13 +40,22 @@
 #   AGENTBOX_AGENT_START_TIMEOUT  ms for `herdr agent start` (90000, as herd's create_agent)
 #   AGENTBOX_HMAC_KEY_FILE    tetherd's HMAC key (/run/secrets/agentbox/tether-hmac/key)
 #   AGENTBOX_HA_TOKEN_FILE    Home Assistant long-lived token (/run/secrets/agentbox/ha-token/token)
-#   TETHER_PROXY_CLIENT_CA    public CA of tether-proxy-ca, from a ConfigMap (/etc/agentbox/tether-proxy-ca/ca.crt)
+#   AGENTBOX_SSHD_CONFIG      sshd's config (/etc/agentbox/sshd_config, in the image)
+#   AGENTBOX_SSHD_DIR         sshd's host key, on the home volume ($HOME/.config/agentbox/sshd)
+#   AGENTBOX_SSH_AUTHORIZED_KEYS  the mounted public key(s) sshd accepts; only checked here
+#                             for logging, sshd_config names the path (/etc/agentbox/ssh/authorized_keys)
+#   AGENTBOX_SSHD             off: don't run sshd at all (default on)
+#   TETHER_PROXY_CLIENT_CA    public CA of tether-proxy-ca, from the reflected tetherd-server-tls
+#                             Secret (/run/secrets/agentbox/tetherd-server/ca.crt)
 #   TETHER_HA_URL             (http://home-assistant.home-assistant.svc.cluster.local:8123)
 #   TETHER_HA_NOTIFY_SERVICE  (mobile_app_pixel_11_pro_fold)
 #   TETHER_APPROVAL_TIMEOUT   (300s, tetherd's default and the PC's setting)
 #   TETHER_LOKI_URL           (http://loki-gateway.observability.svc.cluster.local)
 #   POD_IP                    downward-API status.podIP; tetherd's --proxy-addr is $POD_IP:7443.
 #                             Unset means no proxy listener (logged).
+#   TETHER_SUGGEST_KEY_FILE   litellm-proxy key for suggestions (unset: none). Replaced by a 0600
+#                             copy in AGENTBOX_RUNTIME_DIR; if the file is missing or empty,
+#                             TETHER_SUGGEST_URL is unset too and suggestions are off (logged).
 #   TETHER_ALLOWED_USERS etc. any other TETHER_* setting is passed through to tetherd as is.
 set -euo pipefail
 
@@ -52,7 +68,11 @@ AGENTBOX_RUNTIME_DIR=${AGENTBOX_RUNTIME_DIR:-/tmp/agentbox}
 AGENTBOX_STOP_TIMEOUT=${AGENTBOX_STOP_TIMEOUT:-100}
 AGENTBOX_HMAC_KEY_FILE=${AGENTBOX_HMAC_KEY_FILE:-/run/secrets/agentbox/tether-hmac/key}
 AGENTBOX_HA_TOKEN_FILE=${AGENTBOX_HA_TOKEN_FILE:-/run/secrets/agentbox/ha-token/token}
-export TETHER_PROXY_CLIENT_CA=${TETHER_PROXY_CLIENT_CA:-/etc/agentbox/tether-proxy-ca/ca.crt}
+AGENTBOX_SSHD_CONFIG=${AGENTBOX_SSHD_CONFIG:-/etc/agentbox/sshd_config}
+AGENTBOX_SSHD_DIR=${AGENTBOX_SSHD_DIR:-$HOME/.config/agentbox/sshd}
+AGENTBOX_SSH_AUTHORIZED_KEYS=${AGENTBOX_SSH_AUTHORIZED_KEYS:-/etc/agentbox/ssh/authorized_keys}
+AGENTBOX_SSHD=${AGENTBOX_SSHD:-on}
+export TETHER_PROXY_CLIENT_CA=${TETHER_PROXY_CLIENT_CA:-/run/secrets/agentbox/tetherd-server/ca.crt}
 export TETHER_HA_URL=${TETHER_HA_URL:-http://home-assistant.home-assistant.svc.cluster.local:8123}
 export TETHER_HA_NOTIFY_SERVICE=${TETHER_HA_NOTIFY_SERVICE:-mobile_app_pixel_11_pro_fold}
 export TETHER_APPROVAL_TIMEOUT=${TETHER_APPROVAL_TIMEOUT:-300s}
@@ -65,19 +85,28 @@ AGENTBOX_AGENT_START_TIMEOUT=${AGENTBOX_AGENT_START_TIMEOUT:-90000}
 # background subshell (so SIGTERM is handled at once, not after a 90 s agent start).
 HERD_PANES=$AGENTBOX_RUNTIME_DIR/herd-panes
 
-herdr_pid="" tetherd_pid="" tail_pid="" resume_pid="" stopping=0
+herdr_pid="" tetherd_pid="" sshd_sup_pid="" tail_pid="" resume_pid="" stopping=0
 
 log() { printf 'agentbox: %s\n' "$*"; }
 
 # --- 1. herdr ------------------------------------------------------------------------
 start_herdr() {
   mkdir -p "$HOME/.config/herdr"
-  herdr server >>"$HOME/.config/herdr/agentbox-server.log" 2>&1 </dev/null &
+  # In a session of its own: herdr counts only a session leader as a detached
+  # daemon (`herdr status server --json`: detached_server_daemon), and saved SSH
+  # machines refuse a server that isn't one. Without it the PC's `herdr machine
+  # add` says "remote server is not ready for saved machines", or offers to
+  # replace the server, which kills every pane (docs/agentbox.md §herdr machine).
+  # A background job here is never a process-group leader, so setsid execs in
+  # place and $! is still herdr's pid, which main() waits on.
+  setsid herdr server >>"$HOME/.config/herdr/agentbox-server.log" 2>&1 </dev/null &
   herdr_pid=$!
   local i
   for ((i = 0; i < 150; i++)); do
     if herdr status 2>/dev/null | grep -q 'status: running'; then
-      log "herdr server running (pid $herdr_pid)"; return 0
+      log "herdr server running (pid $herdr_pid, detached daemon: $(herdr status server --json 2>/dev/null |
+        jq -r '.capabilities.detached_server_daemon // "unknown"' 2>/dev/null || echo unknown))"
+      return 0
     fi
     kill -0 "$herdr_pid" 2>/dev/null || break
     sleep 0.2
@@ -102,8 +131,20 @@ start_tetherd() {
     log "tetherd not started: no Home Assistant token at $AGENTBOX_HA_TOKEN_FILE"; return 0
   fi
   export TETHER_HMAC_SECRET_FILE=$hmac TETHER_HA_TOKEN_FILE=$token
-  # A PEM, not just a non-empty file: the ConfigMap ships a one-line placeholder
-  # until the CA is pasted in (apps/services/agentbox/tether-proxy-ca-configmap.yaml).
+  # Next-step suggestions. tetherd exits on a group-readable key file, and the
+  # mounted one is 0440 (fsGroup), so it gets a private copy too. With no key yet
+  # suggestions are turned off rather than sent without one.
+  if [[ -n ${TETHER_SUGGEST_KEY_FILE:-} ]]; then
+    local suggest_key
+    if suggest_key=$(private_copy "$TETHER_SUGGEST_KEY_FILE" litellm.key); then
+      export TETHER_SUGGEST_KEY_FILE=$suggest_key
+    else
+      log "tetherd suggestions off: no key at $TETHER_SUGGEST_KEY_FILE"
+      unset TETHER_SUGGEST_URL TETHER_SUGGEST_KEY_FILE
+    fi
+  fi
+  # A PEM, not just a non-empty file: the tetherd-server-tls volume is optional,
+  # so until reflector copies the Secret there is no CA file at all.
   if [[ -n ${POD_IP:-} ]] && grep -q -- '-----BEGIN CERTIFICATE-----' "$TETHER_PROXY_CLIENT_CA" 2>/dev/null; then
     export TETHER_PROXY_ADDR=$POD_IP:7443
   else
@@ -113,6 +154,68 @@ start_tetherd() {
   tetherd serve </dev/null &
   tetherd_pid=$!
   log "tetherd started (pid $tetherd_pid, proxy ${TETHER_PROXY_ADDR:-off})"
+}
+
+# --- 2b. sshd ------------------------------------------------------------------------
+# sshd must be run by absolute path (it re-execs itself).
+AGENTBOX_SSHD_BIN=${AGENTBOX_SSHD_BIN:-/usr/sbin/sshd}
+
+sshd_log() {  # prefix sshd's own stderr (-e) so it reads as the entrypoint's
+  local line
+  while IFS= read -r line; do printf 'agentbox: sshd %s\n' "$line"; done
+}
+
+sshd_host_key() {  # <key path>: generate the host key the first time; it then stays on the volume
+  local key=$1
+  (umask 077 && mkdir -p "$AGENTBOX_SSHD_DIR") && chmod 700 "$AGENTBOX_SSHD_DIR" || return 1
+  if [[ ! -s $key || ! -s $key.pub ]]; then
+    rm -f "$key" "$key.pub"
+    ssh-keygen -q -t ed25519 -N '' -C "agentbox-0 sshd host key" -f "$key" </dev/null >/dev/null || return 1
+    log "sshd host key generated (first start on this volume)"
+  fi
+  # sshd refuses a host key that group or others can read.
+  chmod 600 "$key"
+}
+
+supervise_sshd() {  # <host key>: run sshd in the foreground; restart it 10 s after it exits
+  local key=$1 pid="" rc
+  trap 'if [[ -n $pid ]]; then kill -TERM "$pid" 2>/dev/null; fi; exit 0' TERM
+  while :; do
+    "$AGENTBOX_SSHD_BIN" -D -e -f "$AGENTBOX_SSHD_CONFIG" -h "$key" </dev/null 2> >(sshd_log) &
+    pid=$!
+    log "sshd started (pid $pid)"
+    rc=0
+    wait "$pid" || rc=$?
+    pid=""
+    log "sshd exited ($rc); restarting in 10s"
+    sleep 10 &
+    wait $! || true
+  done
+}
+
+start_sshd() {
+  if [[ $AGENTBOX_SSHD == off ]]; then log "sshd off (AGENTBOX_SSHD=off)"; return 0; fi
+  local key=$AGENTBOX_SSHD_DIR/ssh_host_ed25519_key conf listen keys line
+  if ! sshd_host_key "$key"; then
+    log "sshd not started: could not create a host key in $AGENTBOX_SSHD_DIR"; return 0
+  fi
+  log "sshd host key $(ssh-keygen -lf "$key.pub")"
+  # -T checks the config the way the daemon will read it, and says where it listens.
+  if ! conf=$("$AGENTBOX_SSHD_BIN" -T -f "$AGENTBOX_SSHD_CONFIG" -h "$key" 2>&1 </dev/null); then
+    log "sshd not started: $AGENTBOX_SSHD_CONFIG failed its check: ${conf//$'\n'/; }"; return 0
+  fi
+  listen=$(awk 'tolower($1) == "listenaddress" { print $2 }' <<<"$conf" | paste -sd, -)
+  keys=$(grep -cE '^[^#[:space:]]' "$AGENTBOX_SSH_AUTHORIZED_KEYS" 2>/dev/null || true)
+  if ((${keys:-0} == 0)); then
+    log "sshd: no public key in $AGENTBOX_SSH_AUTHORIZED_KEYS yet, so every login is refused (docs/agentbox.md §herdr machine)"
+  else
+    while IFS= read -r line; do log "sshd authorized key: $line"; done \
+      < <(ssh-keygen -lf "$AGENTBOX_SSH_AUTHORIZED_KEYS" 2>/dev/null || true)
+  fi
+  # The subshell must not run shutdown() on a signal: supervise_sshd sets its own trap.
+  ( trap - TERM INT; supervise_sshd "$key" ) &
+  sshd_sup_pid=$!
+  log "sshd supervisor started (pid $sshd_sup_pid, listening on ${listen:-?} only)"
 }
 
 # --- 4. resume -----------------------------------------------------------------------
@@ -206,10 +309,13 @@ shutdown() {  # [exit code]
     [[ -n $agent ]] && { herdr agent send-keys "$agent" esc >/dev/null 2>&1 || true; }
   done < <(python3 "$AGENTBOX_LIB/resume.py" scan --root "$AGENTBOX_WT_ROOT" \
              --args-dir "$AGENTBOX_PLAN_ARGS_DIR" 2>/dev/null | jq -r '.agent // empty' 2>/dev/null || true)
+  # sshd first: a herdr client on the PC then sees a closed connection, not a
+  # server going away under it. Open sessions end with the herdr server below.
+  if [[ -n $sshd_sup_pid ]]; then kill -TERM "$sshd_sup_pid" 2>/dev/null || true; fi
   if [[ -n $tetherd_pid ]]; then kill -TERM "$tetherd_pid" 2>/dev/null || true; fi
   if [[ -n $herdr_pid ]]; then herdr server stop >/dev/null 2>&1 || kill -TERM "$herdr_pid" 2>/dev/null || true; fi
 
-  for p in $tetherd_pid $herdr_pid; do
+  for p in $sshd_sup_pid $tetherd_pid $herdr_pid; do
     while kill -0 "$p" 2>/dev/null && ((SECONDS < deadline)); do sleep 1; done
     if kill -0 "$p" 2>/dev/null; then log "shutdown: pid $p still running, killing it"; kill -KILL "$p" 2>/dev/null || true; fi
   done
@@ -228,6 +334,7 @@ main() {
 
   start_herdr || exit 1
   start_tetherd
+  start_sshd
   log "herdr Mobile Relay: not run in the pod (docs/agentbox.md, relay-in-pod)"
   : >"$HERD_PANES"
   # The subshell must not run shutdown() itself on a signal: only the parent does.
