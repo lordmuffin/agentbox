@@ -1,0 +1,72 @@
+# agentbox sshd: lets andrew-gamingpc's herdr use the pod as a saved SSH machine
+# (`herdr machine add agentbox`). docs/agentbox.md §herdr machine.
+#
+# sshd runs as the unprivileged `agent` user (uid 1000), started by entrypoint.sh
+# as `sshd -D -e -f /etc/agentbox/sshd_config -h <host key>`. A non-root sshd can
+# only log in the user it runs as, and needs no capability. It listens on the
+# pod's loopback only, so nothing on the pod network reaches it: the PC gets in
+# through `kubectl port-forward` (the kubelet dials localhost inside the pod's
+# network namespace), with the narrow agentbox-ssh-pc Role.
+#
+# What herdr needs over SSH (herdr 0.9.5, docs/agentbox.md §herdr machine): exec
+# channels on stdio (`uname`, `command -v herdr`, `herdr status`, and its
+# remote-client-bridge / remote-api-bridge subcommands) multiplexed over one
+# connection. No port, socket, agent or X11 forwarding, and no sftp (only its
+# install path uses scp, and the image already has herdr on PATH). So all of
+# those are off. agentbox/tests/test_sshd_config.py pins every line below.
+
+Port 2222
+ListenAddress 127.0.0.1
+AddressFamily inet
+
+# Who: only `agent`, only by public key, only the key in the mounted ConfigMap
+# (apps/services/agentbox/ssh-authorized-keys-configmap.yaml). The file is
+# root-owned and read-only in the pod, so an agent can't add a key to it.
+AllowUsers agent
+PermitRootLogin no
+AuthenticationMethods publickey
+PubkeyAuthentication yes
+AuthorizedKeysFile /etc/agentbox/ssh/authorized_keys
+AuthorizedPrincipalsFile none
+PasswordAuthentication no
+PermitEmptyPasswords no
+KbdInteractiveAuthentication no
+HostbasedAuthentication no
+GSSAPIAuthentication no
+UsePAM no
+# Kubernetes mounts every volume group-writable through fsGroup (the home
+# volume, the ConfigMap's directory), which StrictModes would reject. Its job is
+# keeping other local users from planting keys; uid 1000 is the only user here,
+# and the authorized_keys file is root-owned and read-only anyway.
+StrictModes no
+
+# What: a session, nothing forwarded.
+DisableForwarding yes
+AllowAgentForwarding no
+AllowTcpForwarding no
+AllowStreamLocalForwarding no
+GatewayPorts no
+X11Forwarding no
+PermitTunnel no
+PermitListen none
+PermitOpen none
+PermitUserEnvironment no
+PermitUserRC no
+# A TTY for an interactive `ssh agentbox`; herdr's own channels don't ask for one.
+PermitTTY yes
+# No Subsystem line: no sftp.
+
+# Limits. herdr shares one connection (ControlMaster) for the sidebar, `herdr
+# --machine` commands and `machine status`, so MaxSessions stays at the default.
+LoginGraceTime 20
+MaxAuthTries 3
+MaxSessions 10
+MaxStartups 3:50:10
+ClientAliveInterval 30
+ClientAliveCountMax 4
+UseDNS no
+PrintMotd no
+Banner none
+# VERBOSE logs the fingerprint of the key each login used.
+LogLevel VERBOSE
+PidFile none

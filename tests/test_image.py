@@ -127,6 +127,72 @@ class Entrypoint(unittest.TestCase):
         self.assertIn("BEGIN CERTIFICATE", self.text)
 
 
+    def test_tetherd_gets_a_private_copy_of_the_suggest_key(self):
+        # tetherd refuses a group-readable key file and exits, and fsGroup makes the
+        # mount 0440. So the entrypoint copies it to the runtime dir at 0600, and turns
+        # suggestions off (rather than sending no key) when the item doesn't exist yet.
+        self.assertIn('private_copy "$TETHER_SUGGEST_KEY_FILE" litellm.key', self.text)
+        self.assertIn("unset TETHER_SUGGEST_URL TETHER_SUGGEST_KEY_FILE", self.text)
+
+
+# --- sshd for the PC's herdr (homelab-gitops docs/agentbox.md §herdr machine) -----------
+# tests/test_sshd_config.py pins sshd_config itself; these pin how the image and the
+# entrypoint use it. homelab-gitops tests the workload, RBAC and port-forward side.
+class SshdImage(unittest.TestCase):
+    def setUp(self):
+        self.steps = instructions()
+        self.runs = " ".join(a for i, a in self.steps if i == "RUN")
+        self.entry = ENTRYPOINT.read_text()
+
+    def test_openssh_server_installed_and_its_build_host_keys_deleted(self):
+        self.assertRegex(self.runs, r"apt-get install[^&]*\bopenssh-server\b")
+        self.assertIn("rm -f /etc/ssh/ssh_host_*", self.runs)
+
+    def test_config_is_root_owned_in_the_image(self):
+        at = [n for n, (i, a) in enumerate(self.steps) if i == "COPY" and "sshd_config" in a]
+        self.assertEqual([self.steps[n][1] for n in at], ["--chmod=0644 sshd_config /etc/agentbox/sshd_config"])
+        # Copied before USER 1000, so root owns it and `agent` can't edit it.
+        user_at = max(n for n, (i, _) in enumerate(self.steps) if i == "USER")
+        self.assertLess(at[0], user_at)
+        # COPY --chmod=0644 makes /etc/agentbox 0644 too, which nobody can enter.
+        self.assertIn("chmod 0755 /etc/agentbox", self.runs)
+
+    def test_entrypoint_runs_sshd_with_that_config_in_the_foreground(self):
+        self.assertIn("AGENTBOX_SSHD_CONFIG=${AGENTBOX_SSHD_CONFIG:-/etc/agentbox/sshd_config}", self.entry)
+        # sshd re-execs itself, so it must be started by absolute path.
+        self.assertIn("AGENTBOX_SSHD_BIN=${AGENTBOX_SSHD_BIN:-/usr/sbin/sshd}", self.entry)
+        self.assertIn('"$AGENTBOX_SSHD_BIN" -D -e -f "$AGENTBOX_SSHD_CONFIG" -h "$key"', self.entry)
+        self.assertIn('"$AGENTBOX_SSHD_BIN" -T -f "$AGENTBOX_SSHD_CONFIG" -h "$key"', self.entry)
+
+    def test_host_key_is_ed25519_on_the_home_volume_and_private(self):
+        self.assertIn("AGENTBOX_SSHD_DIR=${AGENTBOX_SSHD_DIR:-$HOME/.config/agentbox/sshd}", self.entry)
+        self.assertIn("ssh-keygen -q -t ed25519 -N ''", self.entry)
+        self.assertIn('chmod 600 "$key"', self.entry)
+        self.assertIn('umask 077 && mkdir -p "$AGENTBOX_SSHD_DIR"', self.entry)
+
+    def test_every_sshd_log_line_is_prefixed(self):
+        body = self.entry.split("# --- 2b. sshd", 1)[1].split("# --- 4. resume", 1)[0]
+        msgs = re.findall(r'\blog "([^"]*)"', body)
+        self.assertTrue(msgs)
+        for m in msgs:
+            self.assertTrue(m.startswith("sshd"), m)
+        # sshd's own -e log goes through the same prefix.
+        self.assertIn("printf 'agentbox: sshd %s\\n'", body)
+        self.assertIn("2> >(sshd_log)", body)
+
+    def test_herdr_server_is_a_detached_daemon(self):
+        # Saved SSH machines refuse a server that isn't a session leader
+        # (detached_server_daemon: false); `machine add` would offer to replace it.
+        self.assertIn('setsid herdr server >>"$HOME/.config/herdr/agentbox-server.log" 2>&1 </dev/null &', self.entry)
+        self.assertNotIn("setsid -f", self.entry)  # -f forks: $! would no longer be herdr
+
+    def test_supervised_and_stopped_on_shutdown(self):
+        self.assertIn("  start_sshd\n", self.entry.split("main() {", 1)[1])
+        stop = self.entry.split("shutdown() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn('kill -TERM "$sshd_sup_pid"', stop)
+        self.assertIn("for p in $sshd_sup_pid ", stop)
+
+
 class BuildWorkflow(unittest.TestCase):
     def setUp(self):
         self.wf = yaml.safe_load(WORKFLOW.read_text())
