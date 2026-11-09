@@ -54,7 +54,7 @@ ENV PATH=/usr/local/go/bin:/opt/node/bin:$PATH \
 # The token is mounted for this RUN only, so it never lands in a layer, and it goes
 # in a -c header, so it is never in a URL or .git/config.
 FROM toolchains AS sources
-ARG TETHER_REF=75e7ee733dbc8fecf4724f086786172148c0984b
+ARG TETHER_REF=5b2d2ce656403ec757a07c5112149fbc1e1b6504
 ARG HERD_REF=0b360ba161416a2764de7ed5e700bfd71ab56799
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git make \

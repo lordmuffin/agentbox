@@ -40,6 +40,9 @@
 #   TETHER_LOKI_URL           (http://loki-gateway.observability.svc.cluster.local)
 #   POD_IP                    downward-API status.podIP; tetherd's --proxy-addr is $POD_IP:7443.
 #                             Unset means no proxy listener (logged).
+#   TETHER_SUGGEST_KEY_FILE   litellm-proxy key for suggestions (unset: none). Replaced by a 0600
+#                             copy in AGENTBOX_RUNTIME_DIR; if the file is missing or empty,
+#                             TETHER_SUGGEST_URL is unset too and suggestions are off (logged).
 #   TETHER_ALLOWED_USERS etc. any other TETHER_* setting is passed through to tetherd as is.
 set -euo pipefail
 
@@ -102,6 +105,18 @@ start_tetherd() {
     log "tetherd not started: no Home Assistant token at $AGENTBOX_HA_TOKEN_FILE"; return 0
   fi
   export TETHER_HMAC_SECRET_FILE=$hmac TETHER_HA_TOKEN_FILE=$token
+  # Next-step suggestions. tetherd exits on a group-readable key file, and the
+  # mounted one is 0440 (fsGroup), so it gets a private copy too. With no key yet
+  # suggestions are turned off rather than sent without one.
+  if [[ -n ${TETHER_SUGGEST_KEY_FILE:-} ]]; then
+    local suggest_key
+    if suggest_key=$(private_copy "$TETHER_SUGGEST_KEY_FILE" litellm.key); then
+      export TETHER_SUGGEST_KEY_FILE=$suggest_key
+    else
+      log "tetherd suggestions off: no key at $TETHER_SUGGEST_KEY_FILE"
+      unset TETHER_SUGGEST_URL TETHER_SUGGEST_KEY_FILE
+    fi
+  fi
   # A PEM, not just a non-empty file: the ConfigMap ships a one-line placeholder
   # until the CA is pasted in (apps/services/agentbox/tether-proxy-ca-configmap.yaml).
   if [[ -n ${POD_IP:-} ]] && grep -q -- '-----BEGIN CERTIFICATE-----' "$TETHER_PROXY_CLIENT_CA" 2>/dev/null; then
