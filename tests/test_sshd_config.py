@@ -1,6 +1,6 @@
 """Offline tests for agentbox/sshd_config, the sshd the PC's herdr logs in through.
 
-docs/agentbox.md §herdr machine. sshd runs as `agent` on the pod's loopback; the
+homelab-gitops docs/agentbox.md §herdr machine. sshd runs as `agent` on the pod's loopback; the
 PC reaches it only by `kubectl port-forward`. What herdr needs over SSH is exec
 channels on stdio, so everything else is off: passwords, keyboard-interactive,
 root, every kind of forwarding, sftp.
@@ -10,7 +10,7 @@ loosen it, no Subsystem), and, when an sshd binary is installed, `sshd -T`'s
 effective values, which also catch a directive this sshd version ignores.
 
 Run with:
-    python3 -m unittest discover -s agentbox/tests -t .
+    python3 -m unittest discover -s tests -t .
 """
 from __future__ import annotations
 
