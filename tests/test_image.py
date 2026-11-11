@@ -124,6 +124,12 @@ class Entrypoint(unittest.TestCase):
         self.assertNotIn("HA_TOKEN", start)
         self.assertNotRegex(self.text, r"export TETHER_HA_")
 
+    def test_app_sign_in_is_all_three_settings_or_none(self):
+        # tetherd refuses to start on a partial --app-* set (homelab-gitops #895).
+        start = self.text.split("start_tetherd() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn('private_copy "$AGENTBOX_APP_SESSION_KEY_FILE" app-session.key', start)
+        self.assertIn("unset TETHER_APP_OIDC_ISSUER TETHER_APP_OIDC_CLIENT_ID TETHER_APP_SESSION_KEY_FILE", start)
+
     def test_vapid_key_is_a_private_copy_or_on_the_home_volume(self):
         start = self.text.split("start_tetherd() {", 1)[1].split("\n}\n", 1)[0]
         self.assertIn('private_copy "$AGENTBOX_VAPID_KEY_FILE" vapid.key', start)

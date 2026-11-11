@@ -55,6 +55,13 @@
 #                             Secret (/run/secrets/agentbox/tetherd-server/ca.crt)
 #   TETHER_APPROVAL_TIMEOUT   (300s, tetherd's default and the PC's setting)
 #   TETHER_LOKI_URL           (http://loki-gateway.observability.svc.cluster.local)
+#   TETHER_APP_OIDC_ISSUER, TETHER_APP_OIDC_CLIENT_ID  the Android app's sign-in (tether
+#                             docs/mobile-signin.md). tetherd needs these two and the session
+#                             key, or none of them: it refuses to start on a partial set.
+#   TETHER_APP_SESSION_KEY_FILE  the key tether_app cookies are signed with
+#                             (/run/secrets/agentbox/tether-app-session/key). Replaced by a 0600
+#                             copy. If the key or either OIDC setting is missing, all three are
+#                             unset and app sign-in is off (logged); tetherd still starts.
 #   POD_IP                    downward-API status.podIP; tetherd's --proxy-addr is $POD_IP:7443.
 #                             Unset means no proxy listener (logged).
 #   TETHER_SUGGEST_KEY_FILE   litellm-proxy key for suggestions (unset: none). Replaced by a 0600
@@ -72,6 +79,7 @@ AGENTBOX_RUNTIME_DIR=${AGENTBOX_RUNTIME_DIR:-/tmp/agentbox}
 AGENTBOX_STOP_TIMEOUT=${AGENTBOX_STOP_TIMEOUT:-100}
 AGENTBOX_HMAC_KEY_FILE=${AGENTBOX_HMAC_KEY_FILE:-/run/secrets/agentbox/tether-hmac/key}
 AGENTBOX_VAPID_KEY_FILE=${TETHER_WEBPUSH_KEY:-/run/secrets/agentbox/tether-vapid/key}
+AGENTBOX_APP_SESSION_KEY_FILE=${TETHER_APP_SESSION_KEY_FILE:-/run/secrets/agentbox/tether-app-session/key}
 AGENTBOX_SSHD_CONFIG=${AGENTBOX_SSHD_CONFIG:-/etc/agentbox/sshd_config}
 AGENTBOX_SSHD_DIR=${AGENTBOX_SSHD_DIR:-$HOME/.config/agentbox/sshd}
 AGENTBOX_SSH_AUTHORIZED_KEYS=${AGENTBOX_SSH_AUTHORIZED_KEYS:-/etc/agentbox/ssh/authorized_keys}
@@ -138,6 +146,17 @@ start_tetherd() {
   else
     export TETHER_WEBPUSH_KEY=$HOME/.tether/vapid.key
     log "tetherd VAPID key: none at $AGENTBOX_VAPID_KEY_FILE; using $TETHER_WEBPUSH_KEY on the home volume (generated on first start)"
+  fi
+  # Android app sign-in: all three settings or none, never a partial set.
+  local appkey
+  if [[ -n ${TETHER_APP_OIDC_ISSUER:-} && -n ${TETHER_APP_OIDC_CLIENT_ID:-} ]] \
+      && appkey=$(private_copy "$AGENTBOX_APP_SESSION_KEY_FILE" app-session.key); then
+    export TETHER_APP_SESSION_KEY_FILE=$appkey
+  else
+    if [[ -n ${TETHER_APP_OIDC_ISSUER:-}${TETHER_APP_OIDC_CLIENT_ID:-} ]]; then
+      log "tetherd app sign-in off: needs TETHER_APP_OIDC_ISSUER, TETHER_APP_OIDC_CLIENT_ID and a key at $AGENTBOX_APP_SESSION_KEY_FILE"
+    fi
+    unset TETHER_APP_OIDC_ISSUER TETHER_APP_OIDC_CLIENT_ID TETHER_APP_SESSION_KEY_FILE
   fi
   # Next-step suggestions. tetherd exits on a group-readable key file, and the
   # mounted one is 0440 (fsGroup), so it gets a private copy too. With no key yet
