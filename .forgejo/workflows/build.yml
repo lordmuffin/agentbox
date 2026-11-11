@@ -12,13 +12,10 @@ name: Build agentbox image
 # Actions secret and reaches the Dockerfile only as a BuildKit secret, never as a
 # build arg. A workflow-only change doesn't build: dispatch it.
 
+# Dispatch only since v0.3.0: GitHub builds the image on a push to main
+# (.github/workflows/build.yml, from the GitHub mirror). This stays as a manual
+# fallback, and never runs on a push, so the two never race for one tag.
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - "tests/**"
-      - "**.md"
-      - ".forgejo/**"
   workflow_dispatch:
 
 permissions:
