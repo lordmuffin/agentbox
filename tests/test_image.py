@@ -118,6 +118,17 @@ class Entrypoint(unittest.TestCase):
     def setUp(self):
         self.text = ENTRYPOINT.read_text()
 
+    def test_tetherd_needs_no_home_assistant_token(self):
+        # Web Push only since tether #48: an HA token gate would keep tetherd down.
+        start = self.text.split("start_tetherd() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertNotIn("HA_TOKEN", start)
+        self.assertNotRegex(self.text, r"export TETHER_HA_")
+
+    def test_vapid_key_is_a_private_copy_or_on_the_home_volume(self):
+        start = self.text.split("start_tetherd() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn('private_copy "$AGENTBOX_VAPID_KEY_FILE" vapid.key', start)
+        self.assertIn("TETHER_WEBPUSH_KEY=$HOME/.tether/vapid.key", start)
+
     def test_proxy_listens_on_the_pod_ip(self):
         # tetherd refuses 0.0.0.0 and names, so --proxy-addr comes from POD_IP
         # (homelab-gitops test_tether_proxy.py checks the StatefulSet sets it).

@@ -6,11 +6,13 @@
 #   1. `herdr server` headless, under setsid (saved SSH machines need a detached
 #      daemon); wait until `herdr status` says running.
 #   2. tetherd, configured entirely through TETHER_* env vars that hold URLs and
-#      file paths, never secrets. The two secret files are copied to a private
+#      file paths, never secrets. The secret files are copied to a private
 #      0700 runtime dir at mode 0600 first: tetherd refuses a group-readable
 #      secret file, and a Kubernetes secret volume with fsGroup is group-readable.
-#      If a secret is missing, tetherd is not started and that is logged; the
-#      harness still runs.
+#      Notifications are Web Push only (tether #48): no Home Assistant token.
+#      The HMAC key is required: without it tetherd is not started and that is
+#      logged; the harness still runs. The VAPID key comes from its secret when
+#      that is mounted, otherwise tetherd generates one on the home volume.
 #   2b. sshd, for the PC's herdr (`herdr machine add agentbox`, docs/agentbox.md
 #      §herdr machine): as this user, on 127.0.0.1:2222 only, with
 #      /etc/agentbox/sshd_config. Its ed25519 host key is generated once on the
@@ -39,7 +41,11 @@
 #   AGENTBOX_STOP_TIMEOUT     seconds to wait for children on shutdown (100; the pod gets 120)
 #   AGENTBOX_AGENT_START_TIMEOUT  ms for `herdr agent start` (90000, as herd's create_agent)
 #   AGENTBOX_HMAC_KEY_FILE    tetherd's HMAC key (/run/secrets/agentbox/tether-hmac/key)
-#   AGENTBOX_HA_TOKEN_FILE    Home Assistant long-lived token (/run/secrets/agentbox/ha-token/token)
+#   TETHER_WEBPUSH_KEY        the mounted VAPID key, PKCS#8 PEM (/run/secrets/agentbox/tether-vapid/key).
+#                             Replaced by a 0600 copy. If it is missing or empty, tetherd uses
+#                             $HOME/.tether/vapid.key on the home volume, generated on first
+#                             start and kept across restarts (logged). Switching between the two
+#                             changes the key, and every registered device must re-register.
 #   AGENTBOX_SSHD_CONFIG      sshd's config (/etc/agentbox/sshd_config, in the image)
 #   AGENTBOX_SSHD_DIR         sshd's host key, on the home volume ($HOME/.config/agentbox/sshd)
 #   AGENTBOX_SSH_AUTHORIZED_KEYS  the mounted public key(s) sshd accepts; only checked here
@@ -47,8 +53,6 @@
 #   AGENTBOX_SSHD             off: don't run sshd at all (default on)
 #   TETHER_PROXY_CLIENT_CA    public CA of tether-proxy-ca, from the reflected tetherd-server-tls
 #                             Secret (/run/secrets/agentbox/tetherd-server/ca.crt)
-#   TETHER_HA_URL             (http://home-assistant.home-assistant.svc.cluster.local:8123)
-#   TETHER_HA_NOTIFY_SERVICE  (mobile_app_pixel_11_pro_fold)
 #   TETHER_APPROVAL_TIMEOUT   (300s, tetherd's default and the PC's setting)
 #   TETHER_LOKI_URL           (http://loki-gateway.observability.svc.cluster.local)
 #   POD_IP                    downward-API status.podIP; tetherd's --proxy-addr is $POD_IP:7443.
@@ -67,14 +71,14 @@ AGENTBOX_EVENTS=${AGENTBOX_EVENTS:-$HOME/.local/state/agentbox/events.log}
 AGENTBOX_RUNTIME_DIR=${AGENTBOX_RUNTIME_DIR:-/tmp/agentbox}
 AGENTBOX_STOP_TIMEOUT=${AGENTBOX_STOP_TIMEOUT:-100}
 AGENTBOX_HMAC_KEY_FILE=${AGENTBOX_HMAC_KEY_FILE:-/run/secrets/agentbox/tether-hmac/key}
-AGENTBOX_HA_TOKEN_FILE=${AGENTBOX_HA_TOKEN_FILE:-/run/secrets/agentbox/ha-token/token}
+AGENTBOX_VAPID_KEY_FILE=${TETHER_WEBPUSH_KEY:-/run/secrets/agentbox/tether-vapid/key}
 AGENTBOX_SSHD_CONFIG=${AGENTBOX_SSHD_CONFIG:-/etc/agentbox/sshd_config}
 AGENTBOX_SSHD_DIR=${AGENTBOX_SSHD_DIR:-$HOME/.config/agentbox/sshd}
 AGENTBOX_SSH_AUTHORIZED_KEYS=${AGENTBOX_SSH_AUTHORIZED_KEYS:-/etc/agentbox/ssh/authorized_keys}
 AGENTBOX_SSHD=${AGENTBOX_SSHD:-on}
 export TETHER_PROXY_CLIENT_CA=${TETHER_PROXY_CLIENT_CA:-/run/secrets/agentbox/tetherd-server/ca.crt}
-export TETHER_HA_URL=${TETHER_HA_URL:-http://home-assistant.home-assistant.svc.cluster.local:8123}
-export TETHER_HA_NOTIFY_SERVICE=${TETHER_HA_NOTIFY_SERVICE:-mobile_app_pixel_11_pro_fold}
+# Home Assistant is gone (tether #48); tetherd only warns about these, so drop them.
+unset TETHER_HA_URL TETHER_HA_TOKEN_FILE TETHER_HA_NOTIFY_SERVICE TETHER_HA_CHANNEL
 export TETHER_APPROVAL_TIMEOUT=${TETHER_APPROVAL_TIMEOUT:-300s}
 export TETHER_LOKI_URL=${TETHER_LOKI_URL:-http://loki-gateway.observability.svc.cluster.local}
 # Panes inherit the server's env: resume-plan.sh and agentbox-plan read these.
@@ -123,14 +127,18 @@ private_copy() {  # <src> <name>: copy a secret file to the runtime dir at 0600,
 }
 
 start_tetherd() {
-  local hmac token
+  local hmac vapid
   if ! hmac=$(private_copy "$AGENTBOX_HMAC_KEY_FILE" tether-hmac.key); then
     log "tetherd not started: no HMAC key at $AGENTBOX_HMAC_KEY_FILE"; return 0
   fi
-  if ! token=$(private_copy "$AGENTBOX_HA_TOKEN_FILE" ha.token); then
-    log "tetherd not started: no Home Assistant token at $AGENTBOX_HA_TOKEN_FILE"; return 0
+  export TETHER_HMAC_SECRET_FILE=$hmac
+  # Web Push's VAPID key. The mounted secret is 0400/0440, so it gets a private copy.
+  if vapid=$(private_copy "$AGENTBOX_VAPID_KEY_FILE" vapid.key); then
+    export TETHER_WEBPUSH_KEY=$vapid
+  else
+    export TETHER_WEBPUSH_KEY=$HOME/.tether/vapid.key
+    log "tetherd VAPID key: none at $AGENTBOX_VAPID_KEY_FILE; using $TETHER_WEBPUSH_KEY on the home volume (generated on first start)"
   fi
-  export TETHER_HMAC_SECRET_FILE=$hmac TETHER_HA_TOKEN_FILE=$token
   # Next-step suggestions. tetherd exits on a group-readable key file, and the
   # mounted one is 0440 (fsGroup), so it gets a private copy too. With no key yet
   # suggestions are turned off rather than sent without one.
