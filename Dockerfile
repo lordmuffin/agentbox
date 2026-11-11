@@ -59,7 +59,7 @@ ENV PATH=/usr/local/go/bin:/opt/node/bin:$PATH \
 # forgejo_read_token for both; on GitHub it holds a GitHub token with read access to
 # lordmuffin/tether and lordmuffin/herd, sent as git's basic auth.
 FROM toolchains AS sources
-ARG TETHER_REF=5427285ecccfe69e9b7e43fcc803c1a87fa77f58
+ARG TETHER_REF=a42bbcc57e413956fb6197039686f9f4d62ce135
 ARG HERD_REF=0b360ba161416a2764de7ed5e700bfd71ab56799
 ARG SOURCE_BASE=https://git.apj.dev/lordmuffin
 RUN apt-get update \
