@@ -6,3 +6,4 @@ VERSION
 .git
 .forgejo/
 *.md
+.github/

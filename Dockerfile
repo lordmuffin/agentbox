@@ -54,17 +54,26 @@ ENV PATH=/usr/local/go/bin:/opt/node/bin:$PATH \
 # --- sources: the private repos, cloned with the read token from a BuildKit secret.
 # The token is mounted for this RUN only, so it never lands in a layer, and it goes
 # in a -c header, so it is never in a URL or .git/config.
+# SOURCE_BASE picks the host: git.apj.dev (Forgejo build, a LAN address) or
+# github.com/lordmuffin (GitHub build, .github/workflows/build.yml). The secret id stays
+# forgejo_read_token for both; on GitHub it holds a GitHub token with read access to
+# lordmuffin/tether and lordmuffin/herd, sent as git's basic auth.
 FROM toolchains AS sources
-ARG TETHER_REF=5b2d2ce656403ec757a07c5112149fbc1e1b6504
+ARG TETHER_REF=5427285ecccfe69e9b7e43fcc803c1a87fa77f58
 ARG HERD_REF=0b360ba161416a2764de7ed5e700bfd71ab56799
+ARG SOURCE_BASE=https://git.apj.dev/lordmuffin
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git make \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 RUN --mount=type=secret,id=forgejo_read_token,required=true \
-    auth="Authorization: token $(cat /run/secrets/forgejo_read_token)" \
- && git -c http.extraHeader="$auth" clone --quiet https://git.apj.dev/lordmuffin/tether.git tether \
- && git -c http.extraHeader="$auth" clone --quiet https://git.apj.dev/lordmuffin/herd.git herd \
+    tok="$(cat /run/secrets/forgejo_read_token)" \
+ && case "$SOURCE_BASE" in \
+      https://github.com/*) auth="Authorization: basic $(printf 'x-access-token:%s' "$tok" | base64 -w0)" ;; \
+      *) auth="Authorization: token $tok" ;; \
+    esac \
+ && git -c http.extraHeader="$auth" clone --quiet "$SOURCE_BASE/tether.git" tether \
+ && git -c http.extraHeader="$auth" clone --quiet "$SOURCE_BASE/herd.git" herd \
  && git -C tether -c advice.detachedHead=false checkout --quiet "${TETHER_REF}" \
  && git -C herd -c advice.detachedHead=false checkout --quiet "${HERD_REF}"
 

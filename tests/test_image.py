@@ -24,6 +24,7 @@ VERSION = ROOT / "VERSION"
 ENTRYPOINT = ROOT / "entrypoint.sh"
 WORKFLOW = ROOT / ".forgejo/workflows/build.yml"
 TESTS = ROOT / ".forgejo/workflows/test.yml"
+GH_WORKFLOW = ROOT / ".github/workflows/build.yml"
 IMAGE = "ghcr.io/lordmuffin/agentbox"
 SECRET_ID = "forgejo_read_token"
 TOKENISH = re.compile(r"TOKEN|SECRET|PASSWORD|CREDENTIAL|_KEY\b", re.I)
@@ -109,7 +110,7 @@ class Dockerfile(unittest.TestCase):
 
     def test_tests_and_ci_stay_out_of_the_image(self):
         ignore = (ROOT / ".dockerignore").read_text().split()
-        for entry in ("tests/", ".forgejo/", ".git"):
+        for entry in ("tests/", ".forgejo/", ".github/", ".git"):
             self.assertIn(entry, ignore)
 
 
@@ -199,11 +200,11 @@ class BuildWorkflow(unittest.TestCase):
         self.text = WORKFLOW.read_text()
         self.on = triggers(self.wf)
 
-    def test_builds_on_push_to_main_and_dispatch(self):
+    def test_dispatch_only(self):
+        # GitHub builds on a push to main (GitHubBuildWorkflow); this one is the manual
+        # fallback, so the two never race to push one tag.
         self.assertIn("workflow_dispatch", self.on)
-        self.assertEqual(self.on["push"]["branches"], ["main"])
-        for p in ("tests/**", "**.md", ".forgejo/**"):
-            self.assertIn(p, self.on["push"]["paths-ignore"])
+        self.assertNotIn("push", self.on)
         self.assertNotIn("pull_request", self.on)
 
     def test_publishes_the_image_at_v_version(self):
@@ -250,6 +251,56 @@ class BuildWorkflow(unittest.TestCase):
         m = re.search(r"buildkit-(v[\d.]+)\.linux-amd64\.tar\.gz", self.text)
         self.assertTrue(m)
         self.assertRegex(self.text, rf"[0-9a-f]{{64}}  buildkit-{re.escape(m[1])}\.linux-amd64")
+
+
+class GitHubBuildWorkflow(unittest.TestCase):
+    def setUp(self):
+        self.text = GH_WORKFLOW.read_text()
+        self.wf = yaml.safe_load(self.text)
+        self.on = triggers(self.wf)
+        (self.job,) = self.wf["jobs"].values()
+
+    def test_builds_on_push_to_main_and_dispatch(self):
+        self.assertIn("workflow_dispatch", self.on)
+        self.assertEqual(self.on["push"]["branches"], ["main"])
+        for p in ("tests/**", "**.md", ".forgejo/**"):
+            self.assertIn(p, self.on["push"]["paths-ignore"])
+        self.assertNotIn("pull_request", self.on)
+
+    def test_runs_only_on_github(self):
+        self.assertEqual(self.job["if"], "github.server_url == 'https://github.com'")
+
+    def test_publishes_the_image_at_v_version_for_amd64_only(self):
+        self.assertIn(f"IMAGE: {IMAGE}", self.text)
+        self.assertIn("tr -d '[:space:]' < VERSION", self.text)
+        self.assertIn("platforms: linux/amd64", self.text)
+
+    def test_refuses_to_overwrite_a_tag(self):
+        self.assertIn("lordmuffin/agentbox/manifests/", self.text)
+        self.assertIn("already exists", self.text)
+
+    def test_clones_sources_from_github(self):
+        self.assertIn("SOURCE_BASE=https://github.com/lordmuffin", self.text)
+
+    def test_read_token_is_a_buildkit_secret_never_a_build_arg(self):
+        self.assertIn(f"{SECRET_ID}=${{{{ secrets.SOURCE_READ_TOKEN }}}}", self.text)
+        args = self.text.split("build-args:", 1)[1].split("secrets:", 1)[0]
+        self.assertNotRegex(args, TOKENISH)
+
+    def test_unit_tests_run_before_the_build(self):
+        names = [s.get("name", "") for s in self.job["steps"]]
+        self.assertLess(names.index("Unit and static tests"), names.index("Build and push"))
+        self.assertLess(names.index("Refuse to overwrite an existing tag"), names.index("Build and push"))
+
+
+class SourceClone(unittest.TestCase):
+    def test_source_host_is_an_arg_defaulting_to_forgejo(self):
+        text = DOCKERFILE.read_text()
+        self.assertIn("ARG SOURCE_BASE=https://git.apj.dev/lordmuffin", text)
+        self.assertIn('clone --quiet "$SOURCE_BASE/tether.git" tether', text)
+        self.assertIn('clone --quiet "$SOURCE_BASE/herd.git" herd', text)
+        # GitHub's git-over-HTTPS takes the token as basic auth, Forgejo as `token`.
+        self.assertIn("x-access-token:%s", text)
 
 
 class TestWorkflow(unittest.TestCase):
