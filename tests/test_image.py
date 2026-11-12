@@ -108,6 +108,12 @@ class Dockerfile(unittest.TestCase):
         for f in ("entrypoint.sh", "resume.py", "resume-plan.sh", "agentbox-plan.sh"):
             self.assertIn(f, copied)
 
+    def test_final_stage_installs_pyyaml_for_the_agents_tests(self):
+        # The pod has no PyPI egress, so `import yaml` works only if apt put it there.
+        last = max(n for n, (i, _) in enumerate(self.ins) if i == "FROM")
+        runs = " ".join(a for i, a in self.ins[last:] if i == "RUN")
+        self.assertRegex(runs, r"apt-get install[^&]*\bpython3-yaml\b")
+
     def test_tests_and_ci_stay_out_of_the_image(self):
         ignore = (ROOT / ".dockerignore").read_text().split()
         for entry in ("tests/", ".forgejo/", ".github/", ".git"):

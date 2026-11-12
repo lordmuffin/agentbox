@@ -96,11 +96,12 @@ ARG CLAUDE_CODE_VERSION=2.1.319
 # fj's; libatomic1 is node's. openssh-server is for the PC's herdr (sshd as `agent`,
 # docs/agentbox.md §herdr machine). Its postinst generates host keys in /etc/ssh;
 # they are deleted, so no image ships a private key: the entrypoint makes the pod's
-# own on the home volume.
+# own on the home volume. python3-yaml is PyYAML, for the test suites agents run
+# here (homelab-gitops tests/tdd, tests/test_image.py): the pod has no PyPI egress.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       bash bsdextrautils ca-certificates curl git jq libatomic1 libssl3t64 make openssh-client \
-      openssh-server python3 ripgrep tmux util-linux zlib1g \
+      openssh-server python3 python3-yaml ripgrep tmux util-linux zlib1g \
  && rm -f /etc/ssh/ssh_host_* \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=toolchains /usr/local/go /usr/local/go
