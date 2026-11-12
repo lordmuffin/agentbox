@@ -67,6 +67,15 @@
 #   TETHER_SUGGEST_KEY_FILE   litellm-proxy key for suggestions (unset: none). Replaced by a 0600
 #                             copy in AGENTBOX_RUNTIME_DIR; if the file is missing or empty,
 #                             TETHER_SUGGEST_URL is unset too and suggestions are off (logged).
+#   TETHER_SATELLITES         hub federation, name=secret-file,... (tether docs/federation.md;
+#                             unset: not a hub). Each file gets a 0600 copy and the list is
+#                             rewritten to the copies. A satellite whose file is missing, empty,
+#                             under 32 bytes, the HMAC key or another satellite's secret, or whose
+#                             name is bad or repeated, is dropped and logged; with none left,
+#                             TETHER_SATELLITES is unset. Set, it wins over the satellite settings.
+#   TETHER_HUB_URL, TETHER_HUB_SECRET_FILE, TETHER_SATELLITE_NAME  satellite federation (unset:
+#                             not a satellite). The secret gets a 0600 copy; without the URL or
+#                             a usable secret all satellite settings are unset (logged).
 #   TETHER_ALLOWED_USERS etc. any other TETHER_* setting is passed through to tetherd as is.
 set -euo pipefail
 
@@ -134,12 +143,94 @@ private_copy() {  # <src> <name>: copy a secret file to the runtime dir at 0600,
   install -m 600 "$1" "$dst" && printf '%s\n' "$dst"
 }
 
+trim() {  # <s>: print s without leading or trailing whitespace
+  local s=$1
+  s=${s#"${s%%[![:space:]]*}"}
+  printf '%s' "${s%"${s##*[![:space:]]}"}"
+}
+
+federation_secret() {  # <file>: print its secret (whitespace dropped) if tetherd would take it
+  local s
+  [[ -s $1 && -r $1 ]] || return 1
+  s=$(tr -d '[:space:]' <"$1") || return 1
+  ((${#s} >= 32)) || return 1  # tether config.MinFederationSecretLen
+  printf '%s' "$s"
+}
+
+# Federation (tether docs/federation.md): a hub's TETHER_SATELLITES is a comma list of
+# name=secret-file, a satellite's secret is TETHER_HUB_SECRET_FILE. tetherd exits on a
+# group-readable secret, a short one, one that is also the HMAC key, two satellites
+# with one name or one secret, or hub and satellite settings together. So every
+# secret gets a 0600 private copy, TETHER_SATELLITES is rewritten to the copies, and
+# a satellite that would stop tetherd is dropped and logged instead: a partial set
+# must never take the hub down (homelab-gitops #895). Secrets are compared, never logged.
+federation_secrets() {  # after TETHER_HMAC_SECRET_FILE is the private copy
+  local hmac="" raw name file secret copy kept="" names=","
+  local -a entries secrets=()
+  hmac=$(tr -d '[:space:]' <"$TETHER_HMAC_SECRET_FILE" 2>/dev/null) || hmac=""
+  if [[ -n $(trim "${TETHER_SATELLITES:-}") ]]; then
+    if [[ -n ${TETHER_HUB_URL:-}${TETHER_HUB_SECRET_FILE:-}${TETHER_SATELLITE_NAME:-} ]]; then
+      log "tetherd federation: TETHER_SATELLITES makes this a hub; ignoring TETHER_HUB_URL, TETHER_HUB_SECRET_FILE and TETHER_SATELLITE_NAME"
+    fi
+    unset TETHER_HUB_URL TETHER_HUB_SECRET_FILE TETHER_SATELLITE_NAME TETHER_HUB_HANDOFF_TIMEOUT
+    IFS=, read -ra entries <<<"$TETHER_SATELLITES"
+    for raw in "${entries[@]}"; do
+      [[ -n $(trim "$raw") ]] || continue
+      if [[ $raw != *=* ]]; then
+        log "tetherd federation: satellite entry \"$(trim "$raw")\" dropped: not name=secret-file"; continue
+      fi
+      name=$(trim "${raw%%=*}") file=$(trim "${raw#*=}")
+      name=${name,,}
+      if ! [[ $name =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+        log "tetherd federation: satellite \"$name\" dropped: not a DNS label like andrew-gamingpc"; continue
+      fi
+      if [[ $names == *",$name,"* ]]; then
+        log "tetherd federation: satellite $name dropped: named twice"; continue
+      fi
+      if ! secret=$(federation_secret "$file"); then
+        log "tetherd federation: satellite $name dropped: no secret of at least 32 bytes at $file"; continue
+      fi
+      if [[ -n $hmac && $secret == "$hmac" ]]; then
+        log "tetherd federation: satellite $name dropped: its secret is the HMAC key"; continue
+      fi
+      if [[ " ${secrets[*]} " == *" $secret "* ]]; then
+        log "tetherd federation: satellite $name dropped: its secret is another satellite's"; continue
+      fi
+      if ! copy=$(private_copy "$file" "satellite-$name.secret"); then
+        log "tetherd federation: satellite $name dropped: could not copy $file"; continue
+      fi
+      names+="$name," secrets+=("$secret") kept+="${kept:+,}$name=$copy"
+    done
+    if [[ -n $kept ]]; then
+      export TETHER_SATELLITES=$kept
+      names=${names#,}
+      log "tetherd federation hub: satellites ${names%,}"
+    else
+      unset TETHER_SATELLITES
+      log "tetherd federation hub off: no usable satellite"
+    fi
+    return 0
+  fi
+  unset TETHER_SATELLITES
+  [[ -n ${TETHER_HUB_URL:-}${TETHER_HUB_SECRET_FILE:-}${TETHER_SATELLITE_NAME:-} ]] || return 0
+  if [[ -n ${TETHER_HUB_URL:-} ]] && secret=$(federation_secret "${TETHER_HUB_SECRET_FILE:-}") \
+      && [[ -z $hmac || $secret != "$hmac" ]] \
+      && copy=$(private_copy "$TETHER_HUB_SECRET_FILE" hub.secret); then
+    export TETHER_HUB_SECRET_FILE=$copy
+    log "tetherd federation satellite of $TETHER_HUB_URL as ${TETHER_SATELLITE_NAME:-the host name}"
+  else
+    log "tetherd federation satellite off: needs TETHER_HUB_URL and a secret of at least 32 bytes, not the HMAC key, at ${TETHER_HUB_SECRET_FILE:-(TETHER_HUB_SECRET_FILE unset)}"
+    unset TETHER_HUB_URL TETHER_HUB_SECRET_FILE TETHER_SATELLITE_NAME TETHER_HUB_HANDOFF_TIMEOUT
+  fi
+}
+
 start_tetherd() {
   local hmac vapid
   if ! hmac=$(private_copy "$AGENTBOX_HMAC_KEY_FILE" tether-hmac.key); then
     log "tetherd not started: no HMAC key at $AGENTBOX_HMAC_KEY_FILE"; return 0
   fi
   export TETHER_HMAC_SECRET_FILE=$hmac
+  federation_secrets
   # Web Push's VAPID key. The mounted secret is 0400/0440, so it gets a private copy.
   if vapid=$(private_copy "$AGENTBOX_VAPID_KEY_FILE" vapid.key); then
     export TETHER_WEBPUSH_KEY=$vapid
@@ -374,4 +465,5 @@ main() {
   ((stopping)) || { log "herdr server exited ($rc); stopping"; shutdown 1; }
 }
 
-main "$@"
+# Sourced (tests/test_image.py runs the functions), main does not run.
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then main "$@"; fi

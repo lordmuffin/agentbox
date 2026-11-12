@@ -12,7 +12,12 @@ Ported from homelab-gitops tests/tdd/test_agentbox.py when the image moved here.
 - The workflow publishes ghcr.io/lordmuffin/agentbox:v<VERSION> and refuses to
   overwrite a tag, so VERSION and the StatefulSet's tag move together.
 """
+import os
 import re
+import shutil
+import stat
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -157,6 +162,127 @@ class Entrypoint(unittest.TestCase):
         # suggestions off (rather than sending no key) when the item doesn't exist yet.
         self.assertIn('private_copy "$TETHER_SUGGEST_KEY_FILE" litellm.key', self.text)
         self.assertIn("unset TETHER_SUGGEST_URL TETHER_SUGGEST_KEY_FILE", self.text)
+
+
+class Federation(unittest.TestCase):
+    """Federation secrets (tether docs/federation.md): private copies, never a stopped hub."""
+
+    def setUp(self):
+        self.text = ENTRYPOINT.read_text()
+
+    def test_start_tetherd_handles_federation_after_the_hmac_copy(self):
+        start = self.text.split("start_tetherd() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertLess(start.index("export TETHER_HMAC_SECRET_FILE=$hmac"), start.index("federation_secrets"))
+        self.assertLess(start.index("federation_secrets"), start.index("tetherd serve"))
+
+    def test_every_secret_is_a_private_copy(self):
+        body = self.text.split("federation_secrets() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn('private_copy "$file" "satellite-$name.secret"', body)
+        self.assertIn('private_copy "$TETHER_HUB_SECRET_FILE" hub.secret', body)
+
+    def test_sourcing_does_not_run_main(self):
+        self.assertTrue(self.text.rstrip().endswith('if [[ ${BASH_SOURCE[0]} == "$0" ]]; then main "$@"; fi'))
+
+
+class FederationShell(unittest.TestCase):
+    """Sources entrypoint.sh and runs federation_secrets in a clean environment."""
+
+    def setUp(self):
+        # Without the guard, sourcing runs main(): it would start herdr, tetherd and sshd.
+        if 'if [[ ${BASH_SOURCE[0]} == "$0" ]]; then main "$@"; fi' not in ENTRYPOINT.read_text():
+            self.fail("entrypoint.sh runs main when sourced; not sourcing it")
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.run_dir = self.tmp / "run"
+        self.run_dir.mkdir(mode=0o700)
+        self.hmac = self.secret("hmac", "h" * 64)
+
+    def secret(self, name, value, mode=0o440):
+        path = self.tmp / "mnt" / name
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(value + "\n")
+        path.chmod(mode)
+        return path
+
+    def federate(self, **env):
+        """Run federation_secrets; return (log lines, resulting TETHER_* env)."""
+        script = (
+            'source "$1" && TETHER_HMAC_SECRET_FILE=$(private_copy "$2" tether-hmac.key) '
+            '&& federation_secrets && env | grep "^TETHER_" | grep -v "^TETHER_\\(HMAC\\|PROXY\\|APPROVAL\\|LOKI\\)" || true'
+        )
+        base = {"PATH": os.environ["PATH"], "HOME": str(self.tmp), "AGENTBOX_RUNTIME_DIR": str(self.run_dir)}
+        p = subprocess.run(["bash", "-c", script, "bash", str(ENTRYPOINT), str(self.hmac)],
+                           env={**base, **env}, capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stderr, "")
+        logs = [l for l in p.stdout.splitlines() if l.startswith("agentbox: ")]
+        out = dict(l.split("=", 1) for l in p.stdout.splitlines() if l.startswith("TETHER_"))
+        return logs, out
+
+    def test_satellites_are_rewritten_to_0600_copies(self):
+        a, b = self.secret("pc", "a" * 64), self.secret("mac", "b" * 64)
+        logs, out = self.federate(TETHER_SATELLITES=f" andrew-gamingpc={a}, Mac={b} ")
+        pc, mac = self.run_dir / "satellite-andrew-gamingpc.secret", self.run_dir / "satellite-mac.secret"
+        self.assertEqual(out["TETHER_SATELLITES"], f"andrew-gamingpc={pc},mac={mac}")
+        for copy, src in ((pc, a), (mac, b)):
+            self.assertEqual(stat.S_IMODE(copy.stat().st_mode), 0o600)
+            self.assertEqual(copy.read_text(), src.read_text())
+        self.assertEqual(logs, ["agentbox: tetherd federation hub: satellites andrew-gamingpc,mac"])
+
+    def test_a_missing_or_unusable_satellite_is_dropped_and_logged(self):
+        good = self.secret("pc", "a" * 64)
+        short, hmac_twin, twin = self.secret("short", "c" * 31), self.secret("hm", "h" * 64), self.secret("twin", "a" * 64)
+        empty = self.secret("empty", "")
+        sats = ",".join([f"andrew-gamingpc={good}", f"gone={self.tmp}/mnt/nope", f"empty={empty}",
+                         f"short={short}", f"hm={hmac_twin}", f"twin={twin}", f"andrew-gamingpc={good}",
+                         f"Bad_Name={good}", "garbage"])
+        logs, out = self.federate(TETHER_SATELLITES=sats)
+        self.assertEqual(out["TETHER_SATELLITES"], f"andrew-gamingpc={self.run_dir}/satellite-andrew-gamingpc.secret")
+        text = "\n".join(logs)
+        for name, why in (("gone", "no secret of at least 32 bytes"), ("empty", "no secret of at least 32 bytes"),
+                          ("short", "no secret of at least 32 bytes"), ("hm", "its secret is the HMAC key"),
+                          ("twin", "its secret is another satellite's"), ("andrew-gamingpc", "named twice"),
+                          ('"bad_name"', "not a DNS label"), ('entry "garbage"', "not name=secret-file")):
+            self.assertRegex(text, rf"satellite {re.escape(name)} dropped: {re.escape(why)}")
+        self.assertEqual(sorted(p.name for p in self.run_dir.iterdir()),
+                         ["satellite-andrew-gamingpc.secret", "tether-hmac.key"])
+        for secret in ("a" * 32, "h" * 32, "c" * 31):
+            self.assertNotIn(secret, text)
+
+    def test_no_usable_satellite_turns_the_hub_off(self):
+        logs, out = self.federate(TETHER_SATELLITES=f"andrew-gamingpc={self.tmp}/mnt/nope")
+        self.assertNotIn("TETHER_SATELLITES", out)
+        self.assertEqual(logs[-1], "agentbox: tetherd federation hub off: no usable satellite")
+
+    def test_hub_wins_over_satellite_settings(self):
+        a = self.secret("pc", "a" * 64)
+        logs, out = self.federate(TETHER_SATELLITES=f"andrew-gamingpc={a}", TETHER_HUB_URL="https://hub.example",
+                                  TETHER_HUB_SECRET_FILE=str(a), TETHER_SATELLITE_NAME="x")
+        self.assertEqual(set(out), {"TETHER_SATELLITES"})
+        self.assertIn("ignoring TETHER_HUB_URL", logs[0])
+
+    def test_satellite_secret_is_a_0600_copy(self):
+        s = self.secret("hub", "d" * 64)
+        logs, out = self.federate(TETHER_HUB_URL="https://hub.example", TETHER_HUB_SECRET_FILE=str(s),
+                                  TETHER_SATELLITE_NAME="agentbox")
+        copy = self.run_dir / "hub.secret"
+        self.assertEqual(out, {"TETHER_HUB_URL": "https://hub.example", "TETHER_HUB_SECRET_FILE": str(copy),
+                               "TETHER_SATELLITE_NAME": "agentbox"})
+        self.assertEqual(stat.S_IMODE(copy.stat().st_mode), 0o600)
+        self.assertEqual(logs, ["agentbox: tetherd federation satellite of https://hub.example as agentbox"])
+
+    def test_satellite_without_a_usable_secret_is_off(self):
+        for env in ({"TETHER_HUB_URL": "https://hub.example", "TETHER_HUB_SECRET_FILE": f"{self.tmp}/mnt/nope"},
+                    {"TETHER_HUB_URL": "https://hub.example", "TETHER_HUB_SECRET_FILE": str(self.hmac)},
+                    {"TETHER_HUB_SECRET_FILE": str(self.secret("hub", "d" * 64)), "TETHER_SATELLITE_NAME": "x",
+                     "TETHER_HUB_HANDOFF_TIMEOUT": "5s"}):
+            with self.subTest(env=env):
+                logs, out = self.federate(**env)
+                self.assertEqual(out, {})
+                self.assertIn("tetherd federation satellite off", logs[-1])
+
+    def test_no_federation_settings_log_nothing(self):
+        self.assertEqual(self.federate(), ([], {}))
 
 
 # --- sshd for the PC's herdr (homelab-gitops docs/agentbox.md §herdr machine) -----------
