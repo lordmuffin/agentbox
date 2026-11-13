@@ -10,6 +10,22 @@ and tetherd in one image, plus the entrypoint that resumes herd plans after a re
 - The workload, its secrets and the operator doc live in lordmuffin/homelab-gitops:
   `apps/services/agentbox/` and `docs/agentbox.md`.
 
+## Git over ssh
+
+At start, before tetherd, `entrypoint.sh` installs a deploy key so `git clone git@git-ssh.apj.dev:...`
+works with no TTY (tetherd's New session clone). Both inputs are optional mounts; when the key is
+absent or empty nothing is touched and one line is logged.
+
+| Env | Default | Installed as |
+|---|---|---|
+| `AGENTBOX_GIT_SSH_KEY_FILE` | `/run/secrets/agentbox/git-ssh/key` | `~/.ssh/id_ed25519` (0600, in `~/.ssh` 0700) |
+| `AGENTBOX_GIT_SSH_KNOWN_HOSTS_FILE` | `/run/secrets/agentbox/git-ssh-known-hosts/known_hosts` | `~/.ssh/known_hosts` (0644) |
+
+`~/.ssh/config` gets a `Host git-ssh.apj.dev` block (`IdentitiesOnly`, `StrictHostKeyChecking yes`,
+`BatchMode yes`). Host trust comes only from the mounted known_hosts: no ssh-keyscan, no accept-new.
+Without it the key is still installed, a warning is logged, and host verification fails. No ssh-agent
+is started. Redone on every start. `docs/agentbox.md` (homelab-gitops) should list the mounts.
+
 ## Bumping
 
 1. Change the pin and its sha256 in the `Dockerfile`, or change the scripts.

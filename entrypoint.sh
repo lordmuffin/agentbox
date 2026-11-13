@@ -13,6 +13,9 @@
 #      The HMAC key is required: without it tetherd is not started and that is
 #      logged; the harness still runs. The VAPID key comes from its secret when
 #      that is mounted, otherwise tetherd generates one on the home volume.
+#   2a. git over ssh: the deploy key and pinned host key from the mounted secrets are
+#      installed in ~/.ssh before tetherd starts, so its New session clone works
+#      (see AGENTBOX_GIT_SSH_KEY_FILE below). No ssh-agent is started.
 #   2b. sshd, for the PC's herdr (`herdr machine add agentbox`, docs/agentbox.md
 #      §herdr machine): as this user, on 127.0.0.1:2222 only, with
 #      /etc/agentbox/sshd_config. Its ed25519 host key is generated once on the
@@ -46,6 +49,18 @@
 #                             $HOME/.tether/vapid.key on the home volume, generated on first
 #                             start and kept across restarts (logged). Switching between the two
 #                             changes the key, and every registered device must re-register.
+#   AGENTBOX_GIT_SSH_KEY_FILE  OpenSSH ed25519 private key for git-ssh.apj.dev
+#                             (/run/secrets/agentbox/git-ssh/key). If it exists and is non-empty it
+#                             is installed on every start as ~/.ssh/id_ed25519 (0600, trailing
+#                             newline ensured) in ~/.ssh (0700), with ~/.ssh/config holding a
+#                             `Host git-ssh.apj.dev` block (IdentityFile, IdentitiesOnly,
+#                             StrictHostKeyChecking yes, BatchMode yes). Absent or empty: nothing
+#                             is touched and one line is logged. The key is never logged.
+#   AGENTBOX_GIT_SSH_KNOWN_HOSTS_FILE  the pinned server host key line(s)
+#                             (/run/secrets/agentbox/git-ssh-known-hosts/known_hosts), installed as
+#                             ~/.ssh/known_hosts (0644). Host trust comes only from this file (no
+#                             ssh-keyscan, no accept-new): without it the key is still installed,
+#                             a warning is logged, and host verification fails.
 #   AGENTBOX_SSHD_CONFIG      sshd's config (/etc/agentbox/sshd_config, in the image)
 #   AGENTBOX_SSHD_DIR         sshd's host key, on the home volume ($HOME/.config/agentbox/sshd)
 #   AGENTBOX_SSH_AUTHORIZED_KEYS  the mounted public key(s) sshd accepts; only checked here
@@ -89,6 +104,8 @@ AGENTBOX_STOP_TIMEOUT=${AGENTBOX_STOP_TIMEOUT:-100}
 AGENTBOX_HMAC_KEY_FILE=${AGENTBOX_HMAC_KEY_FILE:-/run/secrets/agentbox/tether-hmac/key}
 AGENTBOX_VAPID_KEY_FILE=${TETHER_WEBPUSH_KEY:-/run/secrets/agentbox/tether-vapid/key}
 AGENTBOX_APP_SESSION_KEY_FILE=${TETHER_APP_SESSION_KEY_FILE:-/run/secrets/agentbox/tether-app-session/key}
+AGENTBOX_GIT_SSH_KEY_FILE=${AGENTBOX_GIT_SSH_KEY_FILE:-/run/secrets/agentbox/git-ssh/key}
+AGENTBOX_GIT_SSH_KNOWN_HOSTS_FILE=${AGENTBOX_GIT_SSH_KNOWN_HOSTS_FILE:-/run/secrets/agentbox/git-ssh-known-hosts/known_hosts}
 AGENTBOX_SSHD_CONFIG=${AGENTBOX_SSHD_CONFIG:-/etc/agentbox/sshd_config}
 AGENTBOX_SSHD_DIR=${AGENTBOX_SSHD_DIR:-$HOME/.config/agentbox/sshd}
 AGENTBOX_SSH_AUTHORIZED_KEYS=${AGENTBOX_SSH_AUTHORIZED_KEYS:-/etc/agentbox/ssh/authorized_keys}
@@ -134,6 +151,38 @@ start_herdr() {
   done
   log "herdr server did not start; see ~/.config/herdr/agentbox-server.log"
   return 1
+}
+
+# --- 1b. git over ssh ----------------------------------------------------------------
+# tetherd clones with no TTY and BatchMode, so the key and the pinned host key must be
+# in place first. The secret is the source of truth: redone on every start.
+setup_git_ssh() {
+  local dir=$HOME/.ssh key=$AGENTBOX_GIT_SSH_KEY_FILE kh=$AGENTBOX_GIT_SSH_KNOWN_HOSTS_FILE
+  if [[ ! -s $key ]]; then
+    log "git ssh: no key at $key; ssh clones off"; return 0
+  fi
+  if ! {
+    (umask 077 && mkdir -p "$dir") && chmod 700 "$dir" &&
+    (umask 077 && cp "$key" "$dir/id_ed25519.tmp") &&
+    { [[ -z $(tail -c1 "$dir/id_ed25519.tmp") ]] || printf '\n' >>"$dir/id_ed25519.tmp"; } &&
+    chmod 600 "$dir/id_ed25519.tmp" && mv -f "$dir/id_ed25519.tmp" "$dir/id_ed25519" &&
+    cat >"$dir/config.tmp" <<'CONF' &&
+Host git-ssh.apj.dev
+  IdentityFile ~/.ssh/id_ed25519
+  IdentitiesOnly yes
+  StrictHostKeyChecking yes
+  BatchMode yes
+CONF
+    chmod 644 "$dir/config.tmp" && mv -f "$dir/config.tmp" "$dir/config"
+  } 2>/dev/null; then
+    rm -f "$dir/id_ed25519.tmp" "$dir/config.tmp"
+    log "git ssh: could not install the key in $dir; ssh clones off"; return 0
+  fi
+  if [[ -s $kh ]] && install -m 644 "$kh" "$dir/known_hosts" 2>/dev/null; then
+    log "git ssh: key installed in $dir for git-ssh.apj.dev, host key pinned from $kh"
+  else
+    log "git ssh: WARNING key installed in $dir but no known_hosts at $kh; host verification will fail"
+  fi
 }
 
 # --- 2. tetherd ----------------------------------------------------------------------
@@ -451,6 +500,7 @@ main() {
   tail_pid=$!
 
   start_herdr || exit 1
+  setup_git_ssh || true
   start_tetherd
   start_sshd
   log "herdr Mobile Relay: not run in the pod (docs/agentbox.md, relay-in-pod)"

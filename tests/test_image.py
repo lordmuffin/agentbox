@@ -288,6 +288,102 @@ class FederationShell(unittest.TestCase):
 # --- sshd for the PC's herdr (homelab-gitops docs/agentbox.md §herdr machine) -----------
 # tests/test_sshd_config.py pins sshd_config itself; these pin how the image and the
 # entrypoint use it. homelab-gitops tests the workload, RBAC and port-forward side.
+class GitSshShell(unittest.TestCase):
+    """Sources entrypoint.sh and runs setup_git_ssh with a throwaway HOME."""
+
+    PRIVATE = "-----BEGIN OPENSSH PRIVATE KEY-----\nSECRETBODYSECRETBODY\n-----END OPENSSH PRIVATE KEY-----"
+    HOST = "git-ssh.apj.dev ssh-ed25519 AAAAFAKEHOSTKEY"
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home = self.tmp / "home"
+        self.home.mkdir()
+        self.key = self.tmp / "key"
+        self.kh = self.tmp / "known_hosts"
+
+    def setup_ssh(self):
+        env = {"PATH": os.environ["PATH"], "HOME": str(self.home),
+               "AGENTBOX_GIT_SSH_KEY_FILE": str(self.key),
+               "AGENTBOX_GIT_SSH_KNOWN_HOSTS_FILE": str(self.kh)}
+        p = subprocess.run(["bash", "-c", 'source "$1" && setup_git_ssh', "bash", str(ENTRYPOINT)],
+                           env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stderr, "")
+        lines = p.stdout.splitlines()
+        self.assertTrue(all(l.startswith("agentbox: git ssh") for l in lines), lines)
+        self.assertNotIn("SECRETBODY", p.stdout)
+        return lines
+
+    def mode(self, name):
+        return stat.S_IMODE((self.home / ".ssh" / name).stat().st_mode)
+
+    def test_installs_key_known_hosts_and_config(self):
+        self.key.write_text(self.PRIVATE)  # no trailing newline
+        self.key.chmod(0o440)
+        self.kh.write_text(self.HOST + "\n")
+        lines = self.setup_ssh()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(self.mode("") & 0o777, 0o700)
+        self.assertEqual((self.home / ".ssh/id_ed25519").read_text(), self.PRIVATE + "\n")
+        self.assertEqual(self.mode("id_ed25519"), 0o600)
+        self.assertEqual((self.home / ".ssh/known_hosts").read_text(), self.HOST + "\n")
+        self.assertEqual(self.mode("known_hosts"), 0o644)
+        conf = (self.home / ".ssh/config").read_text().split()
+        self.assertEqual(conf[:2], ["Host", "git-ssh.apj.dev"])
+        text = " ".join(conf)
+        for want in ("IdentityFile ~/.ssh/id_ed25519", "IdentitiesOnly yes",
+                     "StrictHostKeyChecking yes", "BatchMode yes"):
+            self.assertIn(want, text)
+
+    def test_existing_trailing_newline_is_not_doubled(self):
+        self.key.write_text(self.PRIVATE + "\n")
+        self.kh.write_text(self.HOST + "\n")
+        self.setup_ssh()
+        self.assertEqual((self.home / ".ssh/id_ed25519").read_text(), self.PRIVATE + "\n")
+
+    def test_idempotent_and_the_secret_wins(self):
+        self.key.write_text(self.PRIVATE + "\n")
+        self.kh.write_text(self.HOST + "\n")
+        self.setup_ssh()
+        first = {n: (self.home / ".ssh" / n).read_bytes() for n in ("id_ed25519", "known_hosts", "config")}
+        (self.home / ".ssh/config").write_text("junk\n")
+        (self.home / ".ssh/id_ed25519").write_text("old\n")
+        (self.home / ".ssh/id_ed25519").chmod(0o644)
+        self.setup_ssh()
+        self.assertEqual(first, {n: (self.home / ".ssh" / n).read_bytes() for n in first})
+        self.assertEqual(self.mode("id_ed25519"), 0o600)
+        self.assertEqual(sorted(p.name for p in (self.home / ".ssh").iterdir()),
+                         ["config", "id_ed25519", "known_hosts"])
+
+    def test_absent_or_empty_key_is_a_logged_no_op(self):
+        self.kh.write_text(self.HOST + "\n")
+        for create in (False, True):
+            if create:
+                self.key.write_text("")
+            lines = self.setup_ssh()
+            self.assertEqual(len(lines), 1)
+            self.assertIn("no key", lines[0])
+            self.assertFalse((self.home / ".ssh").exists())
+
+    def test_missing_known_hosts_installs_the_key_and_warns(self):
+        self.key.write_text(self.PRIVATE + "\n")
+        lines = self.setup_ssh()
+        self.assertEqual(len(lines), 1)
+        self.assertIn("WARNING", lines[0])
+        self.assertIn("host verification will fail", lines[0])
+        self.assertTrue((self.home / ".ssh/id_ed25519").is_file())
+        self.assertFalse((self.home / ".ssh/known_hosts").exists())
+
+    def test_runs_before_tetherd_and_never_scans_host_keys(self):
+        text = ENTRYPOINT.read_text()
+        self.assertLess(text.index("  setup_git_ssh || true"), text.index("\n  start_tetherd\n"))
+        code = re.sub(r"(?m)^\s*#.*$", "", text)
+        self.assertNotIn("ssh-keyscan", code)
+        self.assertNotIn("accept-new", code)
+        self.assertNotIn("ssh-agent", code)
+
+
 class SshdImage(unittest.TestCase):
     def setUp(self):
         self.steps = instructions()
