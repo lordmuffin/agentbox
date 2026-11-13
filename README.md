@@ -1,7 +1,7 @@
 # agentbox
 
-The container image behind the `agentbox` StatefulSet on k3s2: herdr, herd, Claude Code
-and tetherd in one image, plus the entrypoint that resumes herd plans after a restart.
+The container image behind the `agentbox` StatefulSet on k3s2: herdr, herd, Claude Code,
+Gemini CLI, Copilot CLI and tetherd in one image, plus the entrypoint that resumes herd plans after a restart.
 
 - Image: `ghcr.io/lordmuffin/agentbox:v<VERSION>`, linux/amd64 only.
 - Built by `.forgejo/workflows/build.yml` on the in-cluster buildkitd. A push to `main`

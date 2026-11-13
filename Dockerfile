@@ -1,4 +1,4 @@
-# agentbox image: herdr + herd + Claude Code + tetherd, plus the tools the agents use.
+# agentbox image: herdr + herd + Claude Code + Gemini CLI + Copilot CLI + tetherd, plus the tools the agents use.
 # homelab-gitops docs/agentbox.md §Image. Built by .forgejo/workflows/build.yml on the
 # in-cluster buildkitd, which passes the Forgejo read token as a BuildKit secret:
 #
@@ -59,7 +59,7 @@ ENV PATH=/usr/local/go/bin:/opt/node/bin:$PATH \
 # forgejo_read_token for both; on GitHub it holds a GitHub token with read access to
 # lordmuffin/tether and lordmuffin/herd, sent as git's basic auth.
 FROM toolchains AS sources
-ARG TETHER_REF=d647cb8046f7e406388194226b1f43041c3e004c
+ARG TETHER_REF=f0f13166c51d09ce594c7380ab61ca75ffcc4e41
 ARG HERD_REF=0b360ba161416a2764de7ed5e700bfd71ab56799
 ARG SOURCE_BASE=https://git.apj.dev/lordmuffin
 RUN apt-get update \
@@ -92,6 +92,10 @@ RUN make install PREFIX=/usr/local DESTDIR=/out
 # --- the image.
 FROM debian:trixie-20261104-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 ARG CLAUDE_CODE_VERSION=2.1.319
+# Gemini CLI and Copilot CLI (tether #75 runs them by bare command name). Both at least
+# two weeks old at pinning time (0.66.0: 2026-10-27, 1.0.105: 2026-10-28).
+ARG GEMINI_CLI_VERSION=0.66.0
+ARG COPILOT_CLI_VERSION=1.0.105
 # bsdextrautils is util-linux's `column`, which herd needs; libssl3t64 and zlib1g are
 # fj's; libatomic1 is node's. openssh-server is for the PC's herdr (sshd as `agent`,
 # docs/agentbox.md §herdr machine). Its postinst generates host keys in /etc/ssh;
@@ -116,10 +120,13 @@ ENV PATH=/usr/local/go/bin:/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbi
     DISABLE_TELEMETRY=1 \
     DISABLE_ERROR_REPORTING=1 \
     AGENTBOX_LIB=/opt/agentbox
-# Its postinstall links the native linux-x64 binary from the optional dependency.
+# Claude Code's postinstall links the native linux-x64 binary from the optional dependency.
 RUN npm install -g --prefix /usr/local "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+      "@google/gemini-cli@${GEMINI_CLI_VERSION}" "@github/copilot@${COPILOT_CLI_VERSION}" \
  && npm cache clean --force \
  && claude --version \
+ && gemini --version \
+ && copilot --version \
  && herdr --version \
  && herd -h >/dev/null \
  && tetherd version \
