@@ -163,7 +163,7 @@ setup_git_ssh() {
   fi
   if ! {
     (umask 077 && mkdir -p "$dir") && chmod 700 "$dir" &&
-    (umask 077 && cp "$key" "$dir/id_ed25519.tmp") &&
+    (umask 077 && cat "$key" >"$dir/id_ed25519.tmp") &&
     { [[ -z $(tail -c1 "$dir/id_ed25519.tmp") ]] || printf '\n' >>"$dir/id_ed25519.tmp"; } &&
     chmod 600 "$dir/id_ed25519.tmp" && mv -f "$dir/id_ed25519.tmp" "$dir/id_ed25519" &&
     cat >"$dir/config.tmp" <<'CONF' &&
