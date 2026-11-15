@@ -110,7 +110,8 @@ class Dockerfile(unittest.TestCase):
         self.assertEqual(len(entry), 1)
         self.assertIn("entrypoint.sh", entry[0])
         copied = " ".join(a for w, a in self.ins if w == "COPY")
-        for f in ("entrypoint.sh", "resume.py", "resume-plan.sh", "agentbox-plan.sh"):
+        for f in ("entrypoint.sh", "resume.py", "prune_sessions.py", "resume-plan.sh",
+                  "agentbox-plan.sh"):
             self.assertIn(f, copied)
 
     def test_final_stage_installs_pyyaml_for_the_agents_tests(self):

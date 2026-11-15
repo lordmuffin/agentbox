@@ -3,6 +3,8 @@
 # in progress when the pod last stopped. docs/agentbox.md §Entrypoint.
 #
 # Start order:
+#   0. Prune herdr's saved agent bindings, so the restore cannot OOM the container
+#      (prune_sessions.py; keeps $AGENTBOX_MAX_LIVE_AGENTS in-progress plans).
 #   1. `herdr server` headless, under setsid (saved SSH machines need a detached
 #      daemon); wait until `herdr status` says running.
 #   2. tetherd, configured entirely through TETHER_* env vars that hold URLs and
@@ -36,7 +38,15 @@
 #   6. Otherwise wait on the herdr server, so the container lives as long as it does.
 #
 # Settings (env, with defaults). Stage 4's manifests mount these paths:
-#   AGENTBOX_LIB              dir holding resume.py and resume-plan.sh (default: this script's dir)
+#   AGENTBOX_LIB              dir holding resume.py, prune_sessions.py and resume-plan.sh
+#                             (default: this script's dir)
+#   AGENTBOX_HERDR_SESSION    herdr's saved session, pruned before herdr starts
+#                             ($HOME/.config/herdr/session.json)
+#   AGENTBOX_MAX_LIVE_AGENTS  how many restored `claude --resume` panes to keep (6).
+#                             Each costs ~240 MB, so this is what bounds the restore
+#                             against the container's memory limit. 0 keeps none.
+#   AGENTBOX_PRUNE_MANIFEST   where stripped session ids are recorded, to resume by hand
+#                             ($HOME/.local/state/agentbox/pruned-sessions.tsv)
 #   AGENTBOX_WT_ROOT          herd worktrees ($HOME/git/wt)
 #   AGENTBOX_PLAN_ARGS_DIR    agent args saved by agentbox-plan ($HOME/.local/state/agentbox/plans)
 #   AGENTBOX_EVENTS           resume-plan.sh's result log, echoed to stdout ($HOME/.local/state/agentbox/events.log)
@@ -119,6 +129,10 @@ export TETHER_LOKI_URL=${TETHER_LOKI_URL:-http://loki-gateway.observability.svc.
 export AGENTBOX_LIB AGENTBOX_WT_ROOT AGENTBOX_PLAN_ARGS_DIR AGENTBOX_EVENTS
 
 AGENTBOX_AGENT_START_TIMEOUT=${AGENTBOX_AGENT_START_TIMEOUT:-90000}
+AGENTBOX_HERDR_SESSION=${AGENTBOX_HERDR_SESSION:-$HOME/.config/herdr/session.json}
+AGENTBOX_MAX_LIVE_AGENTS=${AGENTBOX_MAX_LIVE_AGENTS:-6}
+AGENTBOX_PRUNE_MANIFEST=${AGENTBOX_PRUNE_MANIFEST:-$HOME/.local/state/agentbox/pruned-sessions.tsv}
+export AGENTBOX_HERDR_SESSION AGENTBOX_MAX_LIVE_AGENTS AGENTBOX_PRUNE_MANIFEST
 # Panes running herd plan -R, one per line. A file, because resume runs in a
 # background subshell (so SIGTERM is handled at once, not after a 90 s agent start).
 HERD_PANES=$AGENTBOX_RUNTIME_DIR/herd-panes
@@ -126,6 +140,31 @@ HERD_PANES=$AGENTBOX_RUNTIME_DIR/herd-panes
 herdr_pid="" tetherd_pid="" sshd_sup_pid="" tail_pid="" resume_pid="" stopping=0
 
 log() { printf 'agentbox: %s\n' "$*"; }
+
+# --- 0. prune the saved agent bindings ----------------------------------------------
+# herdr restores every pane it ever saved, one `claude --resume` each, all at
+# once. A box with a pane per feature worktree therefore asks for far more
+# memory than the container has and is OOM-killed mid-restore, every restart,
+# because the state causing it is on the PVC. Keep the newest
+# $AGENTBOX_MAX_LIVE_AGENTS bindings whose herd plan is still in progress and
+# strip the rest; stripped panes come back as plain shells and their ids go to
+# $AGENTBOX_PRUNE_MANIFEST, so any of them can be resumed by hand.
+#
+# This must run before start_herdr: a live herdr rewrites session.json from
+# memory and would undo it.
+prune_sessions() {
+  [[ -f $AGENTBOX_HERDR_SESSION ]] || { log "prune: no saved herdr session yet"; return 0; }
+  local out
+  if ! out=$(python3 "$AGENTBOX_LIB/prune_sessions.py" apply \
+               --session "$AGENTBOX_HERDR_SESSION" \
+               --max-live "$AGENTBOX_MAX_LIVE_AGENTS" \
+               --manifest "$AGENTBOX_PRUNE_MANIFEST" 2>&1); then
+    # Never block the start: an unpruned restore may still come up.
+    log "prune failed (starting anyway): ${out//$'\n'/ }"
+    return 0
+  fi
+  while IFS= read -r line; do [[ -n $line ]] && log "prune: $line"; done <<<"$out"
+}
 
 # --- 1. herdr ------------------------------------------------------------------------
 start_herdr() {
@@ -499,6 +538,7 @@ main() {
   tail -n0 -F "$AGENTBOX_EVENTS" 2>/dev/null &
   tail_pid=$!
 
+  prune_sessions
   start_herdr || exit 1
   setup_git_ssh || true
   start_tetherd
