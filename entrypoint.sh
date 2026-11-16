@@ -4,7 +4,8 @@
 #
 # Start order:
 #   0. Prune herdr's saved agent bindings, so the restore cannot OOM the container
-#      (prune_sessions.py; keeps $AGENTBOX_MAX_LIVE_AGENTS in-progress plans).
+#      (prune_sessions.py; keeps $AGENTBOX_MAX_LIVE_AGENTS in-progress plans and
+#      $AGENTBOX_MAX_ADHOC_AGENTS recently active ad-hoc sessions).
 #   1. `herdr server` headless, under setsid (saved SSH machines need a detached
 #      daemon); wait until `herdr status` says running.
 #   2. tetherd, configured entirely through TETHER_* env vars that hold URLs and
@@ -45,6 +46,11 @@
 #   AGENTBOX_MAX_LIVE_AGENTS  how many restored `claude --resume` panes to keep (6).
 #                             Each costs ~240 MB, so this is what bounds the restore
 #                             against the container's memory limit. 0 keeps none.
+#   AGENTBOX_MAX_ADHOC_AGENTS  how many restored sessions with no herd plan (Tether's, or
+#                             ones started by hand) to keep on top of those (6), most
+#                             recently active first. Same cost each. 0 keeps none.
+#   AGENTBOX_ADHOC_MAX_AGE_HOURS  an ad-hoc session is only kept if its Claude transcript
+#                             was written to in the last this many hours (24).
 #   AGENTBOX_PRUNE_MANIFEST   where stripped session ids are recorded, to resume by hand
 #                             ($HOME/.local/state/agentbox/pruned-sessions.tsv)
 #   AGENTBOX_WT_ROOT          herd worktrees ($HOME/git/wt)
@@ -146,8 +152,10 @@ log() { printf 'agentbox: %s\n' "$*"; }
 # once. A box with a pane per feature worktree therefore asks for far more
 # memory than the container has and is OOM-killed mid-restore, every restart,
 # because the state causing it is on the PVC. Keep the newest
-# $AGENTBOX_MAX_LIVE_AGENTS bindings whose herd plan is still in progress and
-# strip the rest; stripped panes come back as plain shells and their ids go to
+# $AGENTBOX_MAX_LIVE_AGENTS bindings whose herd plan is still in progress, plus
+# the $AGENTBOX_MAX_ADHOC_AGENTS most recently active sessions with no plan
+# (read from the env by prune_sessions.py), so a rollout does not leave the
+# sessions in use sitting at a shell. Strip the rest; stripped panes come back as plain shells and their ids go to
 # $AGENTBOX_PRUNE_MANIFEST, so any of them can be resumed by hand.
 #
 # This must run before start_herdr: a live herdr rewrites session.json from

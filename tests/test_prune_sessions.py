@@ -33,6 +33,7 @@ class PruneCase(unittest.TestCase):
         self.session_path = self.home / ".config" / "herdr" / "session.json"
         self.session_path.parent.mkdir(parents=True)
         self.manifest = self.home / ".local" / "state" / "agentbox" / "pruned.tsv"
+        self.transcripts = self.home / ".claude" / "projects"
         self._next = 0
         # No herdr server in a unit test, whatever the host happens to be running.
         patch = mock.patch.object(prune_sessions, "herdr_running", return_value=False)
@@ -71,15 +72,25 @@ class PruneCase(unittest.TestCase):
         self.session_path.write_text(json.dumps(session))
         return session
 
-    def report_rows(self, max_live=6) -> list:
+    def report_rows(self, max_live=6, **kw) -> list:
         session = prune_sessions.load_session(self.session_path)
-        return prune_sessions.decide(session, max_live)
+        return prune_sessions.decide(session, max_live, transcripts=self.transcripts, **kw)
+
+    def transcript(self, pane, mtime) -> None:
+        """A Claude transcript for the pane's session, last written at mtime."""
+        import os
+        d = self.transcripts / str(pane["cwd"]).replace("/", "-")
+        d.mkdir(parents=True, exist_ok=True)
+        f = d / f"{pane['agent_session']['value']}.jsonl"
+        f.write_text("{}\n")
+        os.utime(f, (mtime, mtime))
 
     def apply(self, *extra) -> tuple:
         out = io.StringIO()
         with redirect_stdout(out):
             code = prune_sessions.main(["apply", "--session", str(self.session_path),
-                                        "--manifest", str(self.manifest), *extra], environ={})
+                                        "--manifest", str(self.manifest),
+                                        "--transcripts", str(self.transcripts), *extra], environ={})
         return code, out.getvalue()
 
 
@@ -140,6 +151,72 @@ class TestMaxLive(PruneCase):
         rows = self.report_rows(max_live=1)
         kept = [r for r in rows if r["action"] == "keep"]
         self.assertEqual([r["class"] for r in kept], ["live"])
+
+
+class TestAdhoc(PruneCase):
+    """noplan bindings: the recently active ones survive a restart."""
+    NOW = 1_000_000.0
+
+    def adhoc(self, name, hours_ago=None) -> dict:
+        pane = self.pane(self.worktree(name, state=None))
+        if hours_ago is not None:
+            self.transcript(pane, self.NOW - hours_ago * 3600)
+        return pane
+
+    def actions(self, **kw) -> dict:
+        rows = self.report_rows(now=self.NOW, **kw)
+        return {Path(r["cwd"]).name: r["action"] for r in rows}
+
+    def test_recently_active_adhoc_session_is_kept(self):
+        self.write_session([self.adhoc("recent", hours_ago=0.5)])
+        self.assertEqual(self.actions(max_adhoc=6), {"recent": "keep"})
+
+    def test_idle_adhoc_session_is_stripped(self):
+        self.write_session([self.adhoc("stale", hours_ago=30)])
+        self.assertEqual(self.actions(max_adhoc=6), {"stale": "strip"})
+
+    def test_adhoc_hours_sets_the_window(self):
+        self.write_session([self.adhoc("stale", hours_ago=30)])
+        self.assertEqual(self.actions(max_adhoc=6, adhoc_hours=48), {"stale": "keep"})
+
+    def test_no_transcript_is_stripped(self):
+        self.write_session([self.adhoc("never-ran")])
+        self.assertEqual(self.actions(max_adhoc=6), {"never-ran": "strip"})
+
+    def test_most_recent_are_kept_up_to_the_cap(self):
+        self.write_session([self.adhoc(f"s{h}", hours_ago=h) for h in (3, 1, 2)])
+        self.assertEqual(self.actions(max_adhoc=2), {"s1": "keep", "s2": "keep", "s3": "strip"})
+
+    def test_zero_keeps_no_adhoc_session(self):
+        self.write_session([self.adhoc("recent", hours_ago=0.5)])
+        self.assertEqual(self.actions(max_adhoc=0), {"recent": "strip"})
+
+    def test_adhoc_and_live_caps_are_separate(self):
+        live = self.pane(self.worktree("feat-live", "running"))
+        self.write_session([live, self.adhoc("recent", hours_ago=1)])
+        self.assertEqual(self.actions(max_live=1, max_adhoc=1),
+                         {"feat-live": "keep", "recent": "keep"})
+
+    def test_done_plan_is_stripped_even_with_a_fresh_transcript(self):
+        pane = self.pane(self.worktree("feat-done", "complete"))
+        self.transcript(pane, self.NOW - 60)
+        self.write_session([pane])
+        self.assertEqual(self.actions(max_adhoc=6), {"feat-done": "strip"})
+
+    def test_apply_keeps_the_binding_by_default(self):
+        import time
+        pane = self.adhoc("recent")
+        self.transcript(pane, time.time() - 60)
+        self.write_session([pane, self.adhoc("never-ran")])
+        code, out = self.apply()
+        self.assertEqual(code, 0)
+        saved = prune_sessions.bound_panes(json.loads(self.session_path.read_text()))
+        self.assertEqual([p["cwd"] for p in saved], [pane["cwd"]])
+
+    def test_negative_max_adhoc_is_rejected(self):
+        self.write_session([self.adhoc("recent", hours_ago=1)])
+        self.assertEqual(prune_sessions.main(
+            ["report", "--session", str(self.session_path), "--max-adhoc", "-1"], environ={}), 2)
 
 
 class TestApply(PruneCase):
