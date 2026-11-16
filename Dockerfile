@@ -91,7 +91,7 @@ RUN make install PREFIX=/usr/local DESTDIR=/out
 
 # --- the image.
 FROM debian:trixie-20261104-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
-ARG CLAUDE_CODE_VERSION=2.1.319
+ARG CLAUDE_CODE_VERSION=2.1.325
 # Gemini CLI and Copilot CLI (tether #75 runs them by bare command name). Both at least
 # two weeks old at pinning time (0.66.0: 2026-10-27, 1.0.105: 2026-10-28).
 ARG GEMINI_CLI_VERSION=0.66.0
