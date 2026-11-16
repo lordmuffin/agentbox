@@ -26,6 +26,42 @@ absent or empty nothing is touched and one line is logged.
 Without it the key is still installed, a warning is logged, and host verification fails. No ssh-agent
 is started. Redone on every start. `docs/agentbox.md` (homelab-gitops) should list the mounts.
 
+## Restored agent sessions
+
+herdr saves every pane it has opened in `~/.config/herdr/session.json`, including the
+Claude session each pane was running, and restores all of them at once on start -- one
+`claude --resume <id>` per bound pane, about 240 MB each. A box that has accumulated a
+pane per feature worktree therefore asks for far more than its memory limit and is
+OOM-killed part-way through the restore, on every restart, because the state that causes
+it lives on the PVC.
+
+`prune_sessions.py` bounds that. The entrypoint runs it before it starts herdr (a live
+herdr rewrites `session.json` from memory and would undo it), keeping the newest
+`$AGENTBOX_MAX_LIVE_AGENTS` bindings whose herd plan is still in progress -- the same
+statuses `resume.py` resumes -- and stripping the rest. A stripped pane keeps its place,
+its directory and its scrollback and comes back as a plain shell; no transcript is
+touched, and every stripped id is appended to
+`~/.local/state/agentbox/pruned-sessions.tsv` so it can be picked up by hand:
+
+    claude --resume <session-id>      # run in the pane's cwd
+
+To see what a prune would do without writing anything, in the pod:
+
+    /opt/agentbox/prune_sessions.py report
+
+To prune by hand -- recovering a box that is already OOM-looping, or after changing the
+cap -- the server has to be down, because herdr would otherwise overwrite the result:
+
+    kubectl -n agentbox scale statefulset agentbox --replicas=0   # wait for the pod to go
+    # then, with the PVC mounted in a pod that is not running herdr:
+    /opt/agentbox/prune_sessions.py report                        # check first
+    /opt/agentbox/prune_sessions.py apply
+    kubectl -n agentbox scale statefulset agentbox --replicas=1
+
+`apply` refuses to run while a herdr server is up; `--force` overrides that. Each run
+backs `session.json` up beside itself as `session.json.<stamp>.bak`, so a prune can be
+undone by moving the backup back with the server still down.
+
 ## Bumping
 
 1. Change the pin and its sha256 in the `Dockerfile`, or change the scripts.
@@ -38,8 +74,9 @@ is started. Redone on every start. `docs/agentbox.md` (homelab-gitops) should li
 
     python3 -m unittest discover -s tests -t .
 
-`tests/test_resume.py` covers which herd plans the entrypoint resumes. `tests/test_image.py`
-holds the Dockerfile, entrypoint and workflow to their rules.
+`tests/test_resume.py` covers which herd plans the entrypoint resumes,
+`tests/test_prune_sessions.py` which restored agent bindings survive a prune, and
+`tests/test_image.py` holds the Dockerfile, entrypoint and workflow to their rules.
 
 ## Actions secrets
 
