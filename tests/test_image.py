@@ -120,6 +120,23 @@ class Dockerfile(unittest.TestCase):
         runs = " ".join(a for i, a in self.ins[last:] if i == "RUN")
         self.assertRegex(runs, r"apt-get install[^&]*\bpython3-yaml\b")
 
+    def test_final_stage_can_run_make_test_offline(self):
+        # homelab-gitops docs/agentbox.md §Test environment.
+        last = max(n for n, (i, _) in enumerate(self.ins) if i == "FROM")
+        final = self.ins[last:]
+        runs = " ".join(a for i, a in final if i == "RUN")
+        for pkg in ("python3-venv", "python3-pip", "xz-utils"):
+            self.assertRegex(runs, r"apt-get install[^&]*\b" + pkg + r"\b")
+        envs = " ".join(a for i, a in final if i == "ENV")
+        self.assertIn("TDD_PREBAKED=/opt/homelab-test-env", envs)
+        copies = " ".join(a for i, a in final if i == "COPY")
+        self.assertIn("--from=testenv /opt/homelab-test-env /opt/homelab-test-env", copies)
+
+    def test_testenv_bakes_from_a_commit_pinned_checkout(self):
+        text = DOCKERFILE.read_text()
+        self.assertRegex(text, r"ARG HOMELAB_GITOPS_REF=[0-9a-f]{40}\n")
+        self.assertIn("TDD_PREBAKED=/opt/homelab-test-env scripts/tdd/prebake.sh", text)
+
     def test_tests_and_ci_stay_out_of_the_image(self):
         ignore = (ROOT / ".dockerignore").read_text().split()
         for entry in ("tests/", ".forgejo/", ".github/", ".git"):
