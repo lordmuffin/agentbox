@@ -89,6 +89,30 @@ FROM sources AS herd
 WORKDIR /src/herd
 RUN make install PREFIX=/usr/local DESTDIR=/out
 
+# --- testenv: homelab-gitops' test prerequisites (docs/agentbox.md §Test environment).
+# The pod has no PyPI egress, so `make test` needs its pinned tools and a wheelhouse
+# baked in here, where the build has network. scripts/tdd/prebake.sh in a checkout of
+# homelab-gitops pinned to a main commit does it; `agentbox-build` needs Read on that repo.
+# Same base digest as the final image, so the wheels match its python3. Bump
+# HOMELAB_GITOPS_REF and VERSION together when tools.versions or requirements-dev.txt change.
+FROM toolchains AS testenv
+ARG HOMELAB_GITOPS_REF=25fefc4726abbabbc97cad25c827cda2e56098dc
+ARG SOURCE_BASE=https://git.apj.dev/lordmuffin
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git make python3 python3-pip python3-venv \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+RUN --mount=type=secret,id=forgejo_read_token,required=true \
+    tok="$(cat /run/secrets/forgejo_read_token)" \
+ && case "$SOURCE_BASE" in \
+      https://github.com/*) auth="Authorization: basic $(printf 'x-access-token:%s' "$tok" | base64 -w0)" ;; \
+      *) auth="Authorization: token $tok" ;; \
+    esac \
+ && git -c http.extraHeader="$auth" clone --quiet "$SOURCE_BASE/homelab-gitops.git" homelab-gitops \
+ && git -C homelab-gitops -c advice.detachedHead=false checkout --quiet "${HOMELAB_GITOPS_REF}"
+WORKDIR /src/homelab-gitops
+RUN TDD_PREBAKED=/opt/homelab-test-env scripts/tdd/prebake.sh
+
 # --- the image.
 FROM debian:trixie-20261104-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 ARG CLAUDE_CODE_VERSION=2.1.325
@@ -102,10 +126,13 @@ ARG COPILOT_CLI_VERSION=1.0.105
 # they are deleted, so no image ships a private key: the entrypoint makes the pod's
 # own on the home volume. python3-yaml is PyYAML, for the test suites agents run
 # here (homelab-gitops tests/tdd, tests/test_image.py): the pod has no PyPI egress.
+# python3-venv, python3-pip and xz-utils are what `make deps` / `make tools` need; the
+# testenv stage bakes the wheelhouse they install from.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       bash bsdextrautils ca-certificates curl git jq libatomic1 libssl3t64 make openssh-client \
-      openssh-server python3 python3-yaml ripgrep tmux util-linux zlib1g \
+      openssh-server python3 python3-pip python3-venv python3-yaml ripgrep tmux util-linux \
+      xz-utils zlib1g \
  && rm -f /etc/ssh/ssh_host_* \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=toolchains /usr/local/go /usr/local/go
@@ -113,13 +140,16 @@ COPY --from=toolchains /opt/node /opt/node
 COPY --from=toolchains /out/bin/ /usr/local/bin/
 COPY --from=tetherd /out/bin/tetherd /usr/local/bin/tetherd
 COPY --from=herd /out/usr/local/ /usr/local/
+# Root-owned and read-only; `make deps` / `make tools` install from it offline.
+COPY --from=testenv /opt/homelab-test-env /opt/homelab-test-env
 ENV PATH=/usr/local/go/bin:/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     GOTOOLCHAIN=local \
     GOPROXY=https://proxy.golang.org \
     DISABLE_AUTOUPDATER=1 \
     DISABLE_TELEMETRY=1 \
     DISABLE_ERROR_REPORTING=1 \
-    AGENTBOX_LIB=/opt/agentbox
+    AGENTBOX_LIB=/opt/agentbox \
+    TDD_PREBAKED=/opt/homelab-test-env
 # Claude Code's postinstall links the native linux-x64 binary from the optional dependency.
 RUN npm install -g --prefix /usr/local "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
       "@google/gemini-cli@${GEMINI_CLI_VERSION}" "@github/copilot@${COPILOT_CLI_VERSION}" \
