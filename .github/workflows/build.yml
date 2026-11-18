@@ -7,14 +7,21 @@ name: Build agentbox image (GitHub)
 # replacing a running image.
 #
 # Runs on the GitHub mirror of lordmuffin/agentbox (pushed from git.apj.dev). A GitHub
-# runner can't reach git.apj.dev (a LAN address), so the Dockerfile clones tether and herd
-# from their GitHub copies (SOURCE_BASE). Forgejo never runs this file: it reads
+# runner can't reach git.apj.dev (a LAN address), so the Dockerfile clones tether, herd and
+# homelab-gitops from their GitHub copies (SOURCE_BASE). Every repo the Dockerfile clones
+# needs a GitHub mirror: homelab-gitops had none, and the testenv stage's clone failed with
+# "repository not found" on every build from v0.3.24 (the stage's first release) to v0.3.27.
+# Forgejo never runs this file: it reads
 # .forgejo/workflows/ when that exists, and the job is also guarded on github.com.
 # .forgejo/workflows/build.yml is dispatch-only, a manual fallback.
 #
 # Secrets (repo Settings -> Secrets and variables -> Actions):
-#   SOURCE_READ_TOKEN  a fine-grained token, Contents: read on lordmuffin/tether and
-#                      lordmuffin/herd. Reaches the Dockerfile only as a BuildKit secret.
+#   SOURCE_READ_TOKEN  a fine-grained token, Contents: read on lordmuffin/tether,
+#                      lordmuffin/herd and lordmuffin/homelab-gitops. Reaches the Dockerfile
+#                      only as a BuildKit secret. This is a GitHub token: the Forgejo repo
+#                      secret of the same name is a separate Forgejo one (homelab-gitops
+#                      docs/agentbox.md §Build credential). Adding a repo to the Dockerfile's
+#                      clones means adding it here too.
 #   GHCR_TOKEN         optional: a token with write:packages. Without it, GITHUB_TOKEN is
 #                      used, which needs the package's "Manage Actions access" to give
 #                      this repo the Write role.
