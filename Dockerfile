@@ -57,7 +57,9 @@ ENV PATH=/usr/local/go/bin:/opt/node/bin:$PATH \
 # SOURCE_BASE picks the host: git.apj.dev (Forgejo build, a LAN address) or
 # github.com/lordmuffin (GitHub build, .github/workflows/build.yml). The secret id stays
 # forgejo_read_token for both; on GitHub it holds a GitHub token with read access to
-# lordmuffin/tether and lordmuffin/herd, sent as git's basic auth.
+# lordmuffin/tether, lordmuffin/herd and lordmuffin/homelab-gitops, sent as git's basic auth.
+# A repo cloned here must exist as a GitHub mirror and be in that token's Contents: read list,
+# or the GitHub build fails with "repository not found".
 FROM toolchains AS sources
 ARG TETHER_REF=54749b496ddc96f69aa6e7b965136659baa047a0
 ARG HERD_REF=3d98b942685eb08eee8c25604c1e2a847e62d9c0
@@ -92,7 +94,9 @@ RUN make install PREFIX=/usr/local DESTDIR=/out
 # --- testenv: homelab-gitops' test prerequisites (docs/agentbox.md §Test environment).
 # The pod has no PyPI egress, so `make test` needs its pinned tools and a wheelhouse
 # baked in here, where the build has network. scripts/tdd/prebake.sh in a checkout of
-# homelab-gitops pinned to a main commit does it; `agentbox-build` needs Read on that repo.
+# homelab-gitops pinned to a main commit does it; `agentbox-build` needs Read on that repo,
+# and the GitHub build needs the repo's GitHub mirror plus Contents: read on it (§sources).
+# HOMELAB_GITOPS_REF must be a commit on main: the mirror pushes branches, not loose commits.
 # Same base digest as the final image, so the wheels match its python3. Bump
 # HOMELAB_GITOPS_REF and VERSION together when tools.versions or requirements-dev.txt change.
 FROM toolchains AS testenv
