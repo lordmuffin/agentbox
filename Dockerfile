@@ -60,7 +60,7 @@ ENV PATH=/usr/local/go/bin:/opt/node/bin:$PATH \
 # lordmuffin/tether and lordmuffin/herd, sent as git's basic auth.
 FROM toolchains AS sources
 ARG TETHER_REF=54749b496ddc96f69aa6e7b965136659baa047a0
-ARG HERD_REF=3d0db7657d1278cb9846b54ef03aab3efa7ad4f0
+ARG HERD_REF=3d98b942685eb08eee8c25604c1e2a847e62d9c0
 ARG SOURCE_BASE=https://git.apj.dev/lordmuffin
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git make \
