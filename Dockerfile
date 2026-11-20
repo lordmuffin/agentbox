@@ -135,8 +135,10 @@ ARG COPILOT_CLI_VERSION=1.0.105
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       bash bsdextrautils ca-certificates curl git jq libatomic1 libssl3t64 make openssh-client \
-      openssh-server python3 python3-pip python3-venv python3-yaml ripgrep tmux util-linux \
+      openssh-server python3 python3-pip python3-venv python3-yaml ripgrep tmux tzdata util-linux \
       xz-utils zlib1g \
+ && ln -sf /usr/share/zoneinfo/America/Chicago /etc/localtime \
+ && echo America/Chicago > /etc/timezone \
  && rm -f /etc/ssh/ssh_host_* \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=toolchains /usr/local/go /usr/local/go
@@ -149,6 +151,7 @@ COPY --from=testenv /opt/homelab-test-env /opt/homelab-test-env
 ENV PATH=/usr/local/go/bin:/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     GOTOOLCHAIN=local \
     GOPROXY=https://proxy.golang.org \
+    TZ=America/Chicago \
     DISABLE_AUTOUPDATER=1 \
     DISABLE_TELEMETRY=1 \
     DISABLE_ERROR_REPORTING=1 \
