@@ -3,7 +3,7 @@
 The container image behind the `agentbox` StatefulSet on k3s2: herdr, herd, Claude Code,
 Gemini CLI, Copilot CLI and tetherd in one image, plus the entrypoint that resumes herd plans after a restart.
 
-- Image: `ghcr.io/lordmuffin/agentbox:v<VERSION>`, linux/amd64 only.
+- Image: `git.apj.dev/lordmuffin/agentbox:v<VERSION>` (Forgejo build) and `ghcr.io/lordmuffin/agentbox:v<VERSION>` (GitHub build), linux/amd64 only.
 - Built by `.forgejo/workflows/build.yml` on the in-cluster buildkitd. A push to `main`
   that changes the image builds it, and so does a dispatch. The workflow refuses to
   overwrite a tag that already exists.
@@ -88,5 +88,5 @@ undone by moving the backup back with the server still down.
 | Secret | Source |
 |---|---|
 | `BUILDKIT_CA`, `BUILDKIT_CERT`, `BUILDKIT_KEY` | k3s2 Secret `buildkit/buildkit-client-tls` (homelab-gitops `docs/buildkit.md` §Clients). Refresh after cert-manager renews it, next on 2027-09-26. |
-| `GHCR_TOKEN` | `op://HomeLab/GHCR push token/token` |
+| `REGISTRY_TOKEN` | Forgejo token for user `lordmuffin`, scope `write:package`: the Forgejo build pushes `git.apj.dev/lordmuffin/agentbox`. (`GHCR_TOKEN`, `op://HomeLab/GHCR push token/token`, is now only for the GitHub mirror's build.) |
 | `SOURCE_READ_TOKEN` | `op://HomeLab/agentbox build read token/token`: Forgejo user `agentbox-build`, Read on lordmuffin/tether and lordmuffin/herd, scope `read:repository`. Forgejo refuses secret names that start with `FORGEJO_`. |

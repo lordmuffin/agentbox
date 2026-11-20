@@ -9,8 +9,8 @@ Ported from homelab-gitops tests/tdd/test_agentbox.py when the image moved here.
   pulled by every node.
 - It runs as `agent`, uid/gid 1000, because the PVC mounted at /home/agent is
   owned by that uid (fsGroup 1000).
-- The workflow publishes ghcr.io/lordmuffin/agentbox:v<VERSION> and refuses to
-  overwrite a tag, so VERSION and the StatefulSet's tag move together.
+- The GitHub workflow publishes ghcr.io/lordmuffin/agentbox:v<VERSION> and the Forgejo
+  one git.apj.dev/lordmuffin/agentbox:v<VERSION>; both refuse to overwrite a tag, so VERSION and the StatefulSet's tag move together.
 """
 import os
 import re
@@ -30,7 +30,8 @@ ENTRYPOINT = ROOT / "entrypoint.sh"
 WORKFLOW = ROOT / ".forgejo/workflows/build.yml"
 TESTS = ROOT / ".forgejo/workflows/test.yml"
 GH_WORKFLOW = ROOT / ".github/workflows/build.yml"
-IMAGE = "ghcr.io/lordmuffin/agentbox"
+IMAGE = "ghcr.io/lordmuffin/agentbox"  # the GitHub build
+FORGEJO_IMAGE = "git.apj.dev/lordmuffin/agentbox"
 SECRET_ID = "forgejo_read_token"
 TOKENISH = re.compile(r"TOKEN|SECRET|PASSWORD|CREDENTIAL|_KEY\b", re.I)
 ADDR = "tcp://buildkitd.buildkit.svc.cluster.local:1234"
@@ -567,7 +568,7 @@ class BuildWorkflow(unittest.TestCase):
         self.assertNotIn("pull_request", self.on)
 
     def test_publishes_the_image_at_v_version(self):
-        self.assertIn(f"IMAGE: {IMAGE}", self.text)
+        self.assertIn(f"IMAGE: {FORGEJO_IMAGE}", self.text)
         self.assertIn("tr -d '[:space:]' < VERSION", self.text)
         self.assertIn('tag=v$(', self.text)
 
@@ -576,7 +577,7 @@ class BuildWorkflow(unittest.TestCase):
         self.assertIn("--opt platform=linux/amd64", self.text)
 
     def test_refuses_to_overwrite_a_tag(self):
-        self.assertIn("lordmuffin/agentbox/manifests/", self.text)
+        self.assertIn("git.apj.dev/v2/lordmuffin/agentbox/manifests/", self.text)
         self.assertIn("already exists", self.text)
 
     def test_hands_the_read_token_to_buildctl_as_a_secret(self):

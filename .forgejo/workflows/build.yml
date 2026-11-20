@@ -34,7 +34,7 @@ jobs:
     name: Build and push image (buildkitd)
     runs-on: ubuntu-latest
     env:
-      IMAGE: ghcr.io/lordmuffin/agentbox
+      IMAGE: git.apj.dev/lordmuffin/agentbox
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -58,7 +58,7 @@ jobs:
           BUILDKIT_CA: ${{ secrets.BUILDKIT_CA }}
           BUILDKIT_CERT: ${{ secrets.BUILDKIT_CERT }}
           BUILDKIT_KEY: ${{ secrets.BUILDKIT_KEY }}
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
           SOURCE_READ_TOKEN: ${{ secrets.SOURCE_READ_TOKEN }}
         run: |
           # Same version as homelab-gitops apps/services/buildkit/deployment.yaml.
@@ -68,7 +68,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/bin" "$RUNNER_TEMP/tls" "$RUNNER_TEMP/docker"
           tar -xzf buildkit-v0.33.1.linux-amd64.tar.gz -C "$RUNNER_TEMP" bin/buildctl
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-          for v in BUILDKIT_CA BUILDKIT_CERT BUILDKIT_KEY GHCR_TOKEN SOURCE_READ_TOKEN; do
+          for v in BUILDKIT_CA BUILDKIT_CERT BUILDKIT_KEY REGISTRY_TOKEN SOURCE_READ_TOKEN; do
             [ -n "${!v}" ] || { echo "::error::Actions secret $v is not set"; exit 1; }
           done
           ( umask 077
@@ -80,22 +80,21 @@ jobs:
             printf '%s' "$SOURCE_READ_TOKEN" > "$RUNNER_TEMP/forgejo-read-token"
             # buildctl reads registry credentials client side and hands them to
             # buildkitd per session.
-            auth=$(printf 'lordmuffin:%s' "$GHCR_TOKEN" | base64 -w0)
-            printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "$auth" > "$RUNNER_TEMP/docker/config.json" )
+            auth=$(printf 'lordmuffin:%s' "$REGISTRY_TOKEN" | base64 -w0)
+            printf '{"auths":{"git.apj.dev":{"auth":"%s"}}}\n' "$auth" > "$RUNNER_TEMP/docker/config.json" )
 
       - name: Refuse to overwrite an existing tag
         env:
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
         run: |
-          token=$(curl -fsS -u "lordmuffin:$GHCR_TOKEN" \
-            "https://ghcr.io/token?scope=repository:lordmuffin/agentbox:pull" | jq -r .token)
-          code=$(curl -s -o /dev/null -w '%{http_code}' -I -H "Authorization: Bearer $token" \
+          # Forgejo's container registry takes the token as the basic-auth password.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -I -u "lordmuffin:$REGISTRY_TOKEN" \
             -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json" \
-            "https://ghcr.io/v2/lordmuffin/agentbox/manifests/${{ steps.version.outputs.tag }}")
+            "https://git.apj.dev/v2/lordmuffin/agentbox/manifests/${{ steps.version.outputs.tag }}")
           case "$code" in
             404) ;;
             200) echo "::error::agentbox:${{ steps.version.outputs.tag }} already exists. Bump VERSION, then the StatefulSet's image tag in homelab-gitops."; exit 1 ;;
-            *) echo "::error::GHCR answered $code for agentbox:${{ steps.version.outputs.tag }}"; exit 1 ;;
+            *) echo "::error::git.apj.dev registry answered $code for agentbox:${{ steps.version.outputs.tag }}"; exit 1 ;;
           esac
 
       - name: Build and push
