@@ -303,6 +303,102 @@ class FederationShell(unittest.TestCase):
         self.assertEqual(self.federate(), ([], {}))
 
 
+class ForgejoCliShell(unittest.TestCase):
+    """Sources entrypoint.sh and runs setup_forgejo_cli against a fake fj."""
+
+    TOKEN = "0123456789abcdefSECRETTOKEN0123456789ab"
+    # Like the real fj: add-token reads stdin and refuses a host that already has a key.
+    FAKE_FJ = """#!/usr/bin/env bash
+printf '%s\\n' "$*" >>"$FJ_LOG"
+case "$*" in
+  "auth logout git.apj.dev") rm -f "$FJ_KEY" ;;
+  "-H git.apj.dev auth add-token")
+    [[ -e $FJ_KEY ]] && { echo "key for git.apj.dev already exists" >&2; exit 1; }
+    cat >"$FJ_KEY" ;;
+  *) exit 2 ;;
+esac
+"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        fj = self.bin / "fj"
+        fj.write_text(self.FAKE_FJ)
+        fj.chmod(0o755)
+        self.token = self.tmp / "token"
+        self.key = self.tmp / "fj-key"
+        self.log = self.tmp / "fj.log"
+
+    def run_setup(self, with_fj=True, cmd='source "$1" && setup_forgejo_cli', script=ENTRYPOINT):
+        path = (str(self.bin) + ":" if with_fj else "") + "/usr/bin:/bin"
+        env = {"PATH": path, "HOME": str(self.tmp),
+               "AGENTBOX_FORGEJO_TOKEN_FILE": str(self.token),
+               "FJ_LOG": str(self.log), "FJ_KEY": str(self.key)}
+        p = subprocess.run(["bash", "-c", cmd, "bash", str(script)],
+                           env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stderr, "")
+        lines = p.stdout.splitlines()
+        self.assertTrue(all(l.startswith("agentbox: fj") for l in lines), lines)
+        self.assertNotIn("SECRETTOKEN", p.stdout)
+        return lines
+
+    def calls(self):
+        return self.log.read_text().splitlines() if self.log.exists() else []
+
+    def test_loads_the_token_via_stdin_not_argv(self):
+        self.token.write_text(self.TOKEN + "\n")
+        lines = self.run_setup()
+        self.assertEqual(len(lines), 1)
+        self.assertIn("logged in to git.apj.dev", lines[0])
+        self.assertEqual(self.key.read_text(), self.TOKEN)
+        self.assertNotIn("SECRETTOKEN", " ".join(self.calls()))
+
+    def test_replaces_an_existing_login(self):
+        self.key.write_text("stale")
+        self.token.write_text(self.TOKEN)
+        lines = self.run_setup()
+        self.assertIn("logged in", lines[0])
+        self.assertEqual(self.key.read_text(), self.TOKEN)
+        self.assertEqual(self.calls(), ["auth logout git.apj.dev", "-H git.apj.dev auth add-token"])
+
+    def test_absent_empty_or_blank_token_is_a_logged_no_op(self):
+        for content in (None, "", " \n"):
+            if content is not None:
+                self.token.write_text(content)
+            lines = self.run_setup()
+            self.assertEqual(len(lines), 1)
+            self.assertIn("no token", lines[0])
+        self.assertEqual(self.calls(), [])
+
+    def test_no_fj_binary_is_a_logged_no_op(self):
+        self.token.write_text(self.TOKEN)
+        lines = self.run_setup(with_fj=False)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("not installed", lines[0])
+
+    def test_fj_failure_warns_and_does_not_stop_the_start(self):
+        self.token.write_text(self.TOKEN)
+        (self.bin / "fj").write_text("#!/usr/bin/env bash\necho boom >&2; exit 1\n")
+        lines = self.run_setup()
+        self.assertIn("WARNING", lines[0])
+
+    def test_fj_reauth_reruns_the_same_step(self):
+        self.key.write_text("stale")
+        self.token.write_text(self.TOKEN)
+        lines = self.run_setup(cmd='"$1"', script=ROOT / "fj-reauth.sh")
+        self.assertIn("logged in", lines[0])
+        self.assertEqual(self.key.read_text(), self.TOKEN)
+
+    def test_runs_at_start_and_ships_fj_reauth(self):
+        text = ENTRYPOINT.read_text()
+        self.assertIn("  setup_forgejo_cli || true\n", text)
+        docker = DOCKERFILE.read_text()
+        self.assertRegex(docker, r"COPY --chmod=0755 [^\n]*fj-reauth\.sh /opt/agentbox/")
+        self.assertIn("ln -s /opt/agentbox/fj-reauth.sh /usr/local/bin/fj-reauth", docker)
+
 # --- sshd for the PC's herdr (homelab-gitops docs/agentbox.md §herdr machine) -----------
 # tests/test_sshd_config.py pins sshd_config itself; these pin how the image and the
 # entrypoint use it. homelab-gitops tests the workload, RBAC and port-forward side.

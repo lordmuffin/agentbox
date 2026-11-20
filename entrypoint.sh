@@ -19,6 +19,9 @@
 #   2a. git over ssh: the deploy key and pinned host key from the mounted secrets are
 #      installed in ~/.ssh before tetherd starts, so its New session clone works
 #      (see AGENTBOX_GIT_SSH_KEY_FILE below). No ssh-agent is started.
+#   2a'. fj (forgejo-cli): the mounted Forgejo API token is loaded into fj's login for
+#      git.apj.dev, so `fj pr status` etc. work (see AGENTBOX_FORGEJO_TOKEN_FILE below).
+#      `fj-reauth` reruns this step after the 1Password item is rotated.
 #   2b. sshd, for the PC's herdr (`herdr machine add agentbox`, docs/agentbox.md
 #      §herdr machine): as this user, on 127.0.0.1:2222 only, with
 #      /etc/agentbox/sshd_config. Its ed25519 host key is generated once on the
@@ -77,6 +80,13 @@
 #                             ~/.ssh/known_hosts (0644). Host trust comes only from this file (no
 #                             ssh-keyscan, no accept-new): without it the key is still installed,
 #                             a warning is logged, and host verification fails.
+#   AGENTBOX_FORGEJO_TOKEN_FILE  Forgejo API token for fj (/run/secrets/agentbox/forgejo-token/token,
+#                             the Secret agentbox-forgejo-token from 1Password HomeLab /
+#                             agentbox-forgejo-token). If it holds a token, fj's login for
+#                             AGENTBOX_FORGEJO_HOST is replaced with it on every start (stdin, never
+#                             argv or the log). Absent or empty: fj is untouched and one line is
+#                             logged. The token is not checked against the API here.
+#   AGENTBOX_FORGEJO_HOST     the instance fj logs in to (git.apj.dev)
 #   AGENTBOX_SSHD_CONFIG      sshd's config (/etc/agentbox/sshd_config, in the image)
 #   AGENTBOX_SSHD_DIR         sshd's host key, on the home volume ($HOME/.config/agentbox/sshd)
 #   AGENTBOX_SSH_AUTHORIZED_KEYS  the mounted public key(s) sshd accepts; only checked here
@@ -122,6 +132,8 @@ AGENTBOX_VAPID_KEY_FILE=${TETHER_WEBPUSH_KEY:-/run/secrets/agentbox/tether-vapid
 AGENTBOX_APP_SESSION_KEY_FILE=${TETHER_APP_SESSION_KEY_FILE:-/run/secrets/agentbox/tether-app-session/key}
 AGENTBOX_GIT_SSH_KEY_FILE=${AGENTBOX_GIT_SSH_KEY_FILE:-/run/secrets/agentbox/git-ssh/key}
 AGENTBOX_GIT_SSH_KNOWN_HOSTS_FILE=${AGENTBOX_GIT_SSH_KNOWN_HOSTS_FILE:-/run/secrets/agentbox/git-ssh-known-hosts/known_hosts}
+AGENTBOX_FORGEJO_TOKEN_FILE=${AGENTBOX_FORGEJO_TOKEN_FILE:-/run/secrets/agentbox/forgejo-token/token}
+AGENTBOX_FORGEJO_HOST=${AGENTBOX_FORGEJO_HOST:-git.apj.dev}
 AGENTBOX_SSHD_CONFIG=${AGENTBOX_SSHD_CONFIG:-/etc/agentbox/sshd_config}
 AGENTBOX_SSHD_DIR=${AGENTBOX_SSHD_DIR:-$HOME/.config/agentbox/sshd}
 AGENTBOX_SSH_AUTHORIZED_KEYS=${AGENTBOX_SSH_AUTHORIZED_KEYS:-/etc/agentbox/ssh/authorized_keys}
@@ -229,6 +241,26 @@ CONF
     log "git ssh: key installed in $dir for git-ssh.apj.dev, host key pinned from $kh"
   else
     log "git ssh: WARNING key installed in $dir but no known_hosts at $kh; host verification will fail"
+  fi
+}
+
+# --- 1c. fj (forgejo-cli) -------------------------------------------------------------
+# The mounted token is the source of truth: fj's stored login is replaced on every start
+# (fj add-token refuses a host that already has one, hence the logout first).
+setup_forgejo_cli() {
+  local file=$AGENTBOX_FORGEJO_TOKEN_FILE host=$AGENTBOX_FORGEJO_HOST token
+  token=$(tr -d '[:space:]' 2>/dev/null <"$file") || token=""
+  if [[ -z $token ]]; then
+    log "fj: no token at $file; fj not logged in"; return 0
+  fi
+  if ! command -v fj >/dev/null 2>&1; then
+    log "fj: not installed; skipped"; return 0
+  fi
+  fj auth logout "$host" >/dev/null 2>&1 || true
+  if printf '%s' "$token" | fj -H "$host" auth add-token >/dev/null 2>&1; then
+    log "fj: logged in to $host with the token from $file"
+  else
+    log "fj: WARNING could not add the token from $file for $host"
   fi
 }
 
@@ -549,6 +581,7 @@ main() {
   prune_sessions
   start_herdr || exit 1
   setup_git_ssh || true
+  setup_forgejo_cli || true
   start_tetherd
   start_sshd
   log "herdr Mobile Relay: not run in the pod (docs/agentbox.md, relay-in-pod)"

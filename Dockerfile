@@ -168,13 +168,14 @@ RUN npm install -g --prefix /usr/local "@anthropic-ai/claude-code@${CLAUDE_CODE_
  && kubectl version --client \
  && go version && node --version
 
-COPY --chmod=0755 entrypoint.sh resume.py prune_sessions.py resume-plan.sh agentbox-plan.sh /opt/agentbox/
+COPY --chmod=0755 entrypoint.sh resume.py prune_sessions.py resume-plan.sh agentbox-plan.sh fj-reauth.sh /opt/agentbox/
 # Root-owned and read-only for `agent`, so an agent can't loosen it. COPY --chmod also
 # gives the directory it creates 0644, which nobody can enter (sshd then can't read
 # the file, and the kubelet can't mount the authorized key under it), hence the chmod.
 COPY --chmod=0644 sshd_config /etc/agentbox/sshd_config
 RUN chmod 0755 /etc/agentbox \
  && ln -s /opt/agentbox/agentbox-plan.sh /usr/local/bin/agentbox-plan \
+ && ln -s /opt/agentbox/fj-reauth.sh /usr/local/bin/fj-reauth \
  && groupadd -g 1000 agent \
  && useradd -u 1000 -g 1000 -d /home/agent -m -s /bin/bash agent
 USER 1000:1000
