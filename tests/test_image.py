@@ -560,11 +560,9 @@ class BuildWorkflow(unittest.TestCase):
         self.text = WORKFLOW.read_text()
         self.on = triggers(self.wf)
 
-    def test_dispatch_only(self):
-        # GitHub builds on a push to main (GitHubBuildWorkflow); this one is the manual
-        # fallback, so the two never race to push one tag.
+    def test_builds_on_push_to_main_and_dispatch(self):
         self.assertIn("workflow_dispatch", self.on)
-        self.assertNotIn("push", self.on)
+        self.assertEqual(self.on["push"]["branches"], ["main"])
         self.assertNotIn("pull_request", self.on)
 
     def test_publishes_the_image_at_v_version(self):
