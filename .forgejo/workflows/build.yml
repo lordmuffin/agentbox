@@ -10,12 +10,18 @@ name: Build agentbox image
 # from git.apj.dev, which resolves even in public DNS to a LAN address
 # (192.168.10.20). The read token for those two repos is the SOURCE_READ_TOKEN
 # Actions secret and reaches the Dockerfile only as a BuildKit secret, never as a
-# build arg. A workflow-only change doesn't build: dispatch it.
+# build arg. A change to only tests, docs or workflows doesn't build: dispatch it.
 
-# Dispatch only since v0.3.0: GitHub builds the image on a push to main
-# (.github/workflows/build.yml, from the GitHub mirror). This stays as a manual
-# fallback, and never runs on a push, so the two never race for one tag.
+# Runs on every push to main (a merged PR) that changes the image, and on manual
+# dispatch. GitHub builds its own copy to ghcr.io from the mirror
+# (.github/workflows/build.yml); the two push to different registries.
 on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "tests/**"
+      - "**.md"
+      - ".github/**"
   workflow_dispatch:
 
 permissions:
