@@ -117,6 +117,9 @@
 #   TETHER_HUB_URL, TETHER_HUB_SECRET_FILE, TETHER_SATELLITE_NAME  satellite federation (unset:
 #                             not a satellite). The secret gets a 0600 copy; without the URL or
 #                             a usable secret all satellite settings are unset (logged).
+#   AGENTBOX_BROWSER_MCP      0 skips registering the Playwright MCP server with claude (default 1).
+#   AGENTBOX_BROWSER_IGNORE_HTTPS_ERRORS  1: the MCP server and `agentbox-browser` accept
+#                             certificates from a private CA (Chromium doesn't read the system store).
 #   TETHER_ALLOWED_USERS etc. any other TETHER_* setting is passed through to tetherd as is.
 set -euo pipefail
 
@@ -261,6 +264,26 @@ setup_forgejo_cli() {
     log "fj: logged in to $host with the token from $file"
   else
     log "fj: WARNING could not add the token from $file for $host"
+  fi
+}
+
+# --- 1d. browser testing --------------------------------------------------------------
+# Registers the Playwright MCP server with Claude Code (user scope, in ~/.claude.json on the
+# PVC) so agents can drive the image's Chromium: navigate, click, read the accessibility tree,
+# take screenshots. Idempotent, never fatal, and AGENTBOX_BROWSER_MCP=0 turns it off. The
+# server is headless with --no-sandbox because the pod has neither a display nor user namespaces.
+setup_browser_mcp() {
+  [[ ${AGENTBOX_BROWSER_MCP:-1} == 0 ]] && { log "browser: MCP registration off"; return 0; }
+  if ! command -v claude >/dev/null 2>&1 || ! command -v playwright-mcp >/dev/null 2>&1; then
+    log "browser: claude or playwright-mcp not installed; skipped"; return 0
+  fi
+  local args=(--headless --no-sandbox --executable-path "${AGENTBOX_CHROMIUM:-/usr/bin/chromium}")
+  [[ ${AGENTBOX_BROWSER_IGNORE_HTTPS_ERRORS:-} =~ ^(1|true|yes|on)$ ]] && args+=(--ignore-https-errors)
+  claude mcp remove --scope user playwright >/dev/null 2>&1 || true
+  if claude mcp add --scope user playwright -- playwright-mcp "${args[@]}" >/dev/null 2>&1; then
+    log "browser: playwright MCP registered for claude"
+  else
+    log "browser: WARNING could not register the playwright MCP server"
   fi
 }
 
@@ -582,6 +605,7 @@ main() {
   start_herdr || exit 1
   setup_git_ssh || true
   setup_forgejo_cli || true
+  setup_browser_mcp || true
   start_tetherd
   start_sshd
   log "herdr Mobile Relay: not run in the pod (docs/agentbox.md, relay-in-pod)"

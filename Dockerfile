@@ -124,6 +124,11 @@ ARG CLAUDE_CODE_VERSION=2.1.325
 # two weeks old at pinning time (0.66.0: 2026-10-27, 1.0.105: 2026-10-28).
 ARG GEMINI_CLI_VERSION=0.66.0
 ARG COPILOT_CLI_VERSION=1.0.105
+# Browser testing: playwright-core drives Debian's Chromium (no Playwright browser download,
+# which the pod couldn't do anyway); @playwright/mcp is the Claude Code MCP server for it.
+# Both older than two weeks at pinning time (1.64.1: 2026-10-14, 0.0.84: 2026-10-31).
+ARG PLAYWRIGHT_CORE_VERSION=1.64.1
+ARG PLAYWRIGHT_MCP_VERSION=0.0.84
 # bsdextrautils is util-linux's `column`, which herd needs; libssl3t64 and zlib1g are
 # fj's; libatomic1 is node's. openssh-server is for the PC's herdr (sshd as `agent`,
 # docs/agentbox.md §herdr machine). Its postinst generates host keys in /etc/ssh;
@@ -131,11 +136,13 @@ ARG COPILOT_CLI_VERSION=1.0.105
 # own on the home volume. python3-yaml is PyYAML, for the test suites agents run
 # here (homelab-gitops tests/tdd, tests/test_image.py): the pod has no PyPI egress.
 # python3-venv, python3-pip and xz-utils are what `make deps` / `make tools` need; the
-# testenv stage bakes the wheelhouse they install from.
+# testenv stage bakes the wheelhouse they install from. chromium and the two font packages
+# are for agents testing web apps (README §Browser testing): without fonts pages render
+# boxes and screenshots are useless.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      bash bsdextrautils ca-certificates curl git jq libatomic1 libssl3t64 make openssh-client \
-      openssh-server python3 python3-pip python3-venv python3-yaml ripgrep tmux util-linux \
+      bash bsdextrautils ca-certificates chromium curl fonts-liberation fonts-noto-color-emoji \
+      git jq libatomic1 libssl3t64 make openssh-client openssh-server python3 python3-pip python3-venv python3-yaml ripgrep tmux util-linux \
       xz-utils zlib1g \
  && rm -f /etc/ssh/ssh_host_* \
  && rm -rf /var/lib/apt/lists/*
@@ -153,14 +160,19 @@ ENV PATH=/usr/local/go/bin:/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbi
     DISABLE_TELEMETRY=1 \
     DISABLE_ERROR_REPORTING=1 \
     AGENTBOX_LIB=/opt/agentbox \
+    NODE_PATH=/usr/local/lib/node_modules \
+    AGENTBOX_CHROMIUM=/usr/bin/chromium \
     TDD_PREBAKED=/opt/homelab-test-env
 # Claude Code's postinstall links the native linux-x64 binary from the optional dependency.
 RUN npm install -g --prefix /usr/local "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
       "@google/gemini-cli@${GEMINI_CLI_VERSION}" "@github/copilot@${COPILOT_CLI_VERSION}" \
+      "playwright-core@${PLAYWRIGHT_CORE_VERSION}" "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" \
  && npm cache clean --force \
  && claude --version \
  && gemini --version \
  && copilot --version \
+ && chromium --version \
+ && playwright-mcp --version \
  && herdr --version \
  && herd -h >/dev/null \
  && tetherd version \
@@ -168,6 +180,8 @@ RUN npm install -g --prefix /usr/local "@anthropic-ai/claude-code@${CLAUDE_CODE_
  && kubectl version --client \
  && go version && node --version
 
+# `require('agentbox-browser')` and the `agentbox-browser` command; see README §Browser testing.
+COPY --chmod=0755 browser /opt/agentbox/browser
 COPY --chmod=0755 entrypoint.sh resume.py prune_sessions.py resume-plan.sh agentbox-plan.sh fj-reauth.sh /opt/agentbox/
 # Root-owned and read-only for `agent`, so an agent can't loosen it. COPY --chmod also
 # gives the directory it creates 0644, which nobody can enter (sshd then can't read
@@ -176,6 +190,8 @@ COPY --chmod=0644 sshd_config /etc/agentbox/sshd_config
 RUN chmod 0755 /etc/agentbox \
  && ln -s /opt/agentbox/agentbox-plan.sh /usr/local/bin/agentbox-plan \
  && ln -s /opt/agentbox/fj-reauth.sh /usr/local/bin/fj-reauth \
+ && ln -s /opt/agentbox/browser /usr/local/lib/node_modules/agentbox-browser \
+ && ln -s /opt/agentbox/browser/cli.cjs /usr/local/bin/agentbox-browser \
  && groupadd -g 1000 agent \
  && useradd -u 1000 -g 1000 -d /home/agent -m -s /bin/bash agent
 USER 1000:1000
