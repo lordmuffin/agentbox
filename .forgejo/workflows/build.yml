@@ -11,6 +11,7 @@ name: Build agentbox image
 # (192.168.10.20). The read token for those two repos is the SOURCE_READ_TOKEN
 # Actions secret and reaches the Dockerfile only as a BuildKit secret, never as a
 # build arg. A change to only tests, docs or workflows doesn't build: dispatch it.
+# A push that leaves VERSION unchanged finds the tag and skips the build.
 
 # Runs on every push to main (a merged PR) that changes the image, and on manual
 # dispatch. GitHub builds its own copy to ghcr.io from the mirror
@@ -22,6 +23,7 @@ on:
       - "tests/**"
       - "**.md"
       - ".github/**"
+      - ".forgejo/**"
   workflow_dispatch:
 
 permissions:
@@ -90,6 +92,7 @@ jobs:
             printf '{"auths":{"git.apj.dev":{"auth":"%s"}}}\n' "$auth" > "$RUNNER_TEMP/docker/config.json" )
 
       - name: Refuse to overwrite an existing tag
+        id: tag
         env:
           REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
         run: |
@@ -99,11 +102,21 @@ jobs:
             "https://git.apj.dev/v2/lordmuffin/agentbox/manifests/${{ steps.version.outputs.tag }}")
           case "$code" in
             404) ;;
-            200) echo "::error::agentbox:${{ steps.version.outputs.tag }} already exists. Bump VERSION, then the StatefulSet's image tag in homelab-gitops."; exit 1 ;;
+            200)
+              # A push that didn't bump VERSION (a CI-only or docs merge, or a second
+              # merge on the same version) is not an error: the image is already
+              # published. A manual dispatch still fails, so a forgotten bump is loud.
+              if [ "${{ github.event_name }}" = push ]; then
+                echo "agentbox:${{ steps.version.outputs.tag }} already exists; nothing to build." | tee -a "$GITHUB_STEP_SUMMARY"
+                echo "exists=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "::error::agentbox:${{ steps.version.outputs.tag }} already exists. Bump VERSION, then the StatefulSet's image tag in homelab-gitops."; exit 1
+              fi ;;
             *) echo "::error::git.apj.dev registry answered $code for agentbox:${{ steps.version.outputs.tag }}"; exit 1 ;;
           esac
 
       - name: Build and push
+        if: steps.tag.outputs.exists != 'true'
         env:
           DOCKER_CONFIG: ${{ runner.temp }}/docker
         run: |

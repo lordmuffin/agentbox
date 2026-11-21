@@ -5,8 +5,8 @@ Gemini CLI, Copilot CLI and tetherd in one image, plus the entrypoint that resum
 
 - Image: `git.apj.dev/lordmuffin/agentbox:v<VERSION>` (Forgejo build) and `ghcr.io/lordmuffin/agentbox:v<VERSION>` (GitHub build), linux/amd64 only.
 - Built by `.forgejo/workflows/build.yml` on the in-cluster buildkitd. A push to `main`
-  that changes the image (i.e. a merged PR) builds it, and so does a dispatch. The workflow refuses to
-  overwrite a tag that already exists.
+  that changes the image (i.e. a merged PR) builds it, and so does a dispatch. It never overwrites a
+  tag: a push whose version is already published skips the build, and a dispatch fails.
 - The workload, its secrets and the operator doc live in lordmuffin/homelab-gitops:
   `apps/services/agentbox/` and `docs/agentbox.md`.
 
