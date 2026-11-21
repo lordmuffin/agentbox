@@ -26,6 +26,31 @@ absent or empty nothing is touched and one line is logged.
 Without it the key is still installed, a warning is logged, and host verification fails. No ssh-agent
 is started. Redone on every start. `docs/agentbox.md` (homelab-gitops) should list the mounts.
 
+## Browser testing
+
+The image carries Chromium (Debian's `chromium`, plus fonts), `playwright-core` and
+`@playwright/mcp`, so an agent can test tether's PWA, or any other web app, in a real browser.
+The pod has no display and no user namespaces, so Chromium always runs headless with
+`--no-sandbox --disable-dev-shm-usage`; every entry point below sets that.
+
+- **Claude Code MCP.** At start the entrypoint registers a `playwright` MCP server (user scope):
+  the agent navigates, clicks, types, reads the page's accessibility tree and takes screenshots
+  with the `mcp__playwright__*` tools. `AGENTBOX_BROWSER_MCP=0` turns that off.
+- **`agentbox-browser`**, for the shell and for scripts:
+
+      agentbox-browser check                                   # the install works
+      agentbox-browser smoke http://localhost:7000 --device "Pixel 7"
+      agentbox-browser shot http://localhost:7000 /tmp/home.png --viewport 390x844
+
+  `smoke` exits 1 on any console error, uncaught page error, failed request or HTTP >= 400,
+  and reports whether the PWA manifest loads and a service worker registered. `--expect-text`,
+  `--expect-selector`, `--ignore REGEX` and `--screenshot` tune it.
+- **Scripted flows**: `require('agentbox-browser')` gives `launch`, `newPage` (with device
+  emulation), `watch` (collects the errors above) and `smoke`. `browser/examples/pwa-flow.cjs`
+  is a template.
+- A site behind a private CA needs `AGENTBOX_BROWSER_IGNORE_HTTPS_ERRORS=1`; the MCP server picks
+  it up at the next start. Headed mode needs a display and is not supported.
+
 ## Restored agent sessions
 
 herdr saves every pane it has opened in `~/.config/herdr/session.json`, including the
