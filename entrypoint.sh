@@ -92,6 +92,9 @@
 #   AGENTBOX_SSH_AUTHORIZED_KEYS  the mounted public key(s) sshd accepts; only checked here
 #                             for logging, sshd_config names the path (/etc/agentbox/ssh/authorized_keys)
 #   AGENTBOX_SSHD             off: don't run sshd at all (default on)
+#   TETHER_TENANCY            single (default) or multi. multi needs the 32-byte seal key at
+#                             AGENTBOX_SEAL_KEY_FILE (/run/secrets/agentbox/tether-seal/key) and makes
+#                             this tetherd a hub (TETHER_COMPUTERS_DIR, default $HOME/.tether/computers).
 #   TETHER_PROXY_CLIENT_CA    public CA of tether-proxy-ca, from the reflected tetherd-server-tls
 #                             Secret (/run/secrets/agentbox/tetherd-server/ca.crt)
 #   TETHER_APPROVAL_TIMEOUT   (300s, tetherd's default and the PC's setting)
@@ -131,6 +134,7 @@ AGENTBOX_EVENTS=${AGENTBOX_EVENTS:-$HOME/.local/state/agentbox/events.log}
 AGENTBOX_RUNTIME_DIR=${AGENTBOX_RUNTIME_DIR:-/tmp/agentbox}
 AGENTBOX_STOP_TIMEOUT=${AGENTBOX_STOP_TIMEOUT:-100}
 AGENTBOX_HMAC_KEY_FILE=${AGENTBOX_HMAC_KEY_FILE:-/run/secrets/agentbox/tether-hmac/key}
+AGENTBOX_SEAL_KEY_FILE=${AGENTBOX_SEAL_KEY_FILE:-/run/secrets/agentbox/tether-seal/key}
 AGENTBOX_VAPID_KEY_FILE=${TETHER_WEBPUSH_KEY:-/run/secrets/agentbox/tether-vapid/key}
 AGENTBOX_APP_SESSION_KEY_FILE=${TETHER_APP_SESSION_KEY_FILE:-/run/secrets/agentbox/tether-app-session/key}
 AGENTBOX_GIT_SSH_KEY_FILE=${AGENTBOX_GIT_SSH_KEY_FILE:-/run/secrets/agentbox/git-ssh/key}
@@ -375,6 +379,26 @@ federation_secrets() {  # after TETHER_HMAC_SECRET_FILE is the private copy
   fi
 }
 
+# Multi-tenancy (TETHER_TENANCY=multi): each tenant signs in with its own OIDC provider.
+# tetherd needs a hub (TETHER_COMPUTERS_DIR) and a 32-byte seal key at 0600 for the tenant
+# client secrets, and exits otherwise. A missing key falls back to single, logged, rather
+# than leaving tetherd down; an unknown value is left for tetherd to reject.
+multi_tenancy() {
+  [[ ${TETHER_TENANCY:-single} == multi ]] || return 0
+  local seal
+  if ! seal=$(private_copy "$AGENTBOX_SEAL_KEY_FILE" tether-seal.key); then
+    log "tetherd multi-tenancy off: no seal key at $AGENTBOX_SEAL_KEY_FILE (tetherd init creates one)"
+    unset TETHER_TENANCY TETHER_SEAL_KEY_FILE TETHER_COMPUTERS_DIR; return 0
+  fi
+  if [[ -n ${TETHER_HUB_URL:-}${TETHER_HUB_SECRET_FILE:-} ]]; then
+    log "tetherd multi-tenancy off: needs a hub, but this one is configured as a satellite"
+    unset TETHER_TENANCY TETHER_SEAL_KEY_FILE TETHER_COMPUTERS_DIR; return 0
+  fi
+  export TETHER_SEAL_KEY_FILE=$seal
+  export TETHER_COMPUTERS_DIR=${TETHER_COMPUTERS_DIR:-$HOME/.tether/computers}
+  log "tetherd multi-tenancy on (computers dir $TETHER_COMPUTERS_DIR)"
+}
+
 start_tetherd() {
   local hmac vapid
   if ! hmac=$(private_copy "$AGENTBOX_HMAC_KEY_FILE" tether-hmac.key); then
@@ -382,6 +406,7 @@ start_tetherd() {
   fi
   export TETHER_HMAC_SECRET_FILE=$hmac
   federation_secrets
+  multi_tenancy
   # Web Push's VAPID key. The mounted secret is 0400/0440, so it gets a private copy.
   if vapid=$(private_copy "$AGENTBOX_VAPID_KEY_FILE" vapid.key); then
     export TETHER_WEBPUSH_KEY=$vapid
