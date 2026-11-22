@@ -51,6 +51,53 @@ The pod has no display and no user namespaces, so Chromium always runs headless 
 - A site behind a private CA needs `AGENTBOX_BROWSER_IGNORE_HTTPS_ERRORS=1`; the MCP server picks
   it up at the next start. Headed mode needs a display and is not supported.
 
+## NetBird (prod-k3s access)
+
+The image carries the NetBird client (0.81.3, sha256-checked in the `Dockerfile`) and
+`netbird-join.sh`, so agentbox can manage the Hetzner `prod-k3s` cluster over the overlay.
+The policy is one way (`prod-k3s: agentbox to nodes`, group `prod-k3s-agentbox`, tcp 22 and
+6443; homelab-gitops `docs/prod-cluster.md` §Agentbox access). **Off by default**: nothing
+starts unless a setup key is present, and a failed join is logged and ignored, so it can never
+stop agentbox from starting.
+
+- **Setup key.** Made by hand in NetBird (auto-assigns `prod-k3s-agentbox`, reusable, short
+  expiry) and kept in 1Password. It reaches the pod as a mounted Secret file,
+  `/run/secrets/agentbox/netbird/setup-key` (`NB_SETUP_KEY_FILE` to move it), or as
+  `NB_SETUP_KEY` (prefer the file: an env var shows in the pod spec). The entrypoint lifts it
+  out of its own environment before herdr starts, so panes and agents do not inherit it; the
+  script writes it to a 0600 file for `--setup-key-file`, deletes that after `netbird up`, and
+  never puts it on argv or in a log. The peer's identity is kept on the home volume
+  (`~/.config/agentbox/netbird`), so a restart reconnects instead of registering another peer.
+  `AGENTBOX_NETBIRD=off` disables it even with a key.
+- **Mode: userspace (netstack), no privileges.** The pod is non-root with every capability
+  dropped and no `/dev/net/tun`, so the entrypoint runs the client in netstack mode: no root,
+  no capability, no device. Netstack installs **no routes**, so `10.60.1.0/24` is not on the
+  pod's network; reach the cluster through the SOCKS5 proxy on `127.0.0.1:1080`
+  (`NB_SOCKS5_PORT`), the way `netbird-ci-join.sh` does in CI. Peers are reached, so use a
+  node's overlay address (`netbird status` lists the `prod-k3s-*` peers):
+
+      kubectl config set-cluster prod-k3s --server=https://<overlay-ip>:6443 \
+        --proxy-url=socks5://127.0.0.1:1080 --certificate-authority=... --embed-certs
+      ssh -o ProxyCommand='python3 -I /opt/agentbox/socks5-connect.py 127.0.0.1:1080 %h %p' root@<overlay-ip>
+      curl -sk --socks5-hostname 127.0.0.1:1080 https://<overlay-ip>:6443/ping
+
+  The merged policy's destination is the routed *subnet* group, not the nodes' overlay
+  addresses, and netstack does not use subnet routes, so the overlay-address path needs a rule
+  from `prod-k3s-agentbox` to the nodes group (as `prod-k3s: CI to nodes` has), and the API
+  certificate must carry that address (or use `--tls-server-name`).
+- **Mode: kernel, for the real `10.60.1.0/24` route.** `netbird-join.sh kernel` (or
+  `NB_MODE=kernel`) installs a `wt0` interface and the route for the whole pod, so
+  `https://10.60.1.11:6443` works unmodified and the policy needs no change. That needs root,
+  `NET_ADMIN` and `/dev/net/tun`, which the agent container must never get. Run it as a
+  **sidecar container of this same image** (a pod shares one network namespace), with
+  `command: ["/opt/agentbox/netbird-join.sh", "kernel"]`, `runAsUser: 0`, `NET_ADMIN`, the
+  tun device, and the same key Secret. It joins with `--disable-dns` (so the pod's cluster DNS
+  is untouched), `--block-inbound` and `--disable-server-routes`. The k3s2 nodes are LXC
+  containers, so `/dev/net/tun` must also be passed to the node CT.
+
+`netbird-join.sh` is covered by `tests/test_image.py` against a fake `netbird`. A real join
+needs a setup key and was not run by the change that added it.
+
 ## Restored agent sessions
 
 herdr saves every pane it has opened in `~/.config/herdr/session.json`, including the

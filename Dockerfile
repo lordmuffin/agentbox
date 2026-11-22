@@ -27,6 +27,10 @@ ARG FJ_SHA256=6803c12eed17bfadb40ba95da2a6ab58f9b4a7dc10eabfe3512fce7e2fe6216f
 # The k3s2 server version.
 ARG KUBECTL_VERSION=1.36.2
 ARG KUBECTL_SHA256=1e9045ec32bea85da43de85f0065358529ea7c7a152eca78154fba5b58c27d82
+# NetBird client, for the optional join to the prod-k3s overlay (README §NetBird). Pinned to
+# the version homelab-gitops scripts/prod-bootstrap/netbird-ci-join.sh uses.
+ARG NETBIRD_VERSION=0.81.3
+ARG NETBIRD_SHA256=cbdea310068e35449f034544d5137fefee8f6d948fffd020883ffc8b3bab63b1
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl libatomic1 xz-utils \
  && rm -rf /var/lib/apt/lists/*
@@ -45,6 +49,9 @@ RUN curl -fsSLo go.tgz "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \
  && tar -xzf fj.tgz -C /out/bin fj \
  && curl -fsSLo /out/bin/kubectl "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
  && echo "${KUBECTL_SHA256}  /out/bin/kubectl" | sha256sum -c - \
+ && curl -fsSLo netbird.tgz "https://github.com/netbirdio/netbird/releases/download/v${NETBIRD_VERSION}/netbird_${NETBIRD_VERSION}_linux_amd64.tar.gz" \
+ && echo "${NETBIRD_SHA256}  netbird.tgz" | sha256sum -c - \
+ && tar -xzf netbird.tgz -C /out/bin netbird \
  && chmod 0755 /out/bin/* \
  && rm -rf /dl/*
 ENV PATH=/usr/local/go/bin:/opt/node/bin:$PATH \
@@ -178,11 +185,14 @@ RUN npm install -g --prefix /usr/local "@anthropic-ai/claude-code@${CLAUDE_CODE_
  && tetherd version \
  && fj version \
  && kubectl version --client \
+ && netbird version \
  && go version && node --version
 
 # `require('agentbox-browser')` and the `agentbox-browser` command; see README §Browser testing.
 COPY --chmod=0755 browser /opt/agentbox/browser
 COPY --chmod=0755 entrypoint.sh resume.py prune_sessions.py resume-plan.sh agentbox-plan.sh fj-reauth.sh /opt/agentbox/
+# Optional NetBird join and its ssh ProxyCommand helper (README §NetBird).
+COPY --chmod=0755 netbird-join.sh socks5-connect.py /opt/agentbox/
 # Root-owned and read-only for `agent`, so an agent can't loosen it. COPY --chmod also
 # gives the directory it creates 0644, which nobody can enter (sshd then can't read
 # the file, and the kubelet can't mount the authorized key under it), hence the chmod.
