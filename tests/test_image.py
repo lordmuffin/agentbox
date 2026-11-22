@@ -400,6 +400,154 @@ esac
         self.assertRegex(docker, r"COPY --chmod=0755 [^\n]*fj-reauth\.sh /opt/agentbox/")
         self.assertIn("ln -s /opt/agentbox/fj-reauth.sh /usr/local/bin/fj-reauth", docker)
 
+# --- NetBird join to prod-k3s (README §NetBird) -----------------------------------------
+NETBIRD_JOIN = ROOT / "netbird-join.sh"
+
+
+class NetbirdImage(unittest.TestCase):
+    def test_netbird_is_pinned_and_checked_by_sha256(self):
+        text = DOCKERFILE.read_text()
+        self.assertRegex(text, r"ARG NETBIRD_VERSION=0\.81\.3\n")
+        self.assertRegex(text, r"ARG NETBIRD_SHA256=[0-9a-f]{64}\n")
+        self.assertRegex(text, r'echo "\$\{NETBIRD_SHA256\}  netbird\.tgz" \| sha256sum -c -')
+        self.assertIn("releases/download/v${NETBIRD_VERSION}/", text)
+        self.assertNotIn("latest", text.lower().split("netbird_version")[1].split("\n")[0])
+
+    def test_scripts_ship_in_the_image(self):
+        docker = DOCKERFILE.read_text()
+        self.assertRegex(docker, r"COPY --chmod=0755 netbird-join\.sh socks5-connect\.py /opt/agentbox/")
+        self.assertIn("netbird version", docker)
+
+    def test_started_after_herdr_never_fatal_and_key_leaves_the_environment_first(self):
+        text = ENTRYPOINT.read_text()
+        self.assertIn("  setup_netbird || true\n", text)
+        self.assertLess(text.index("  nb_key=${NB_SETUP_KEY:-}\n  unset NB_SETUP_KEY\n"),
+                        text.index("\n  start_herdr || exit 1"))
+        self.assertIn("kill -TERM \"$netbird_pid\"", text)
+
+    def test_the_script_never_puts_the_key_on_argv_or_in_the_log(self):
+        code = re.sub(r"(?m)^\s*#.*$", "", NETBIRD_JOIN.read_text())
+        self.assertNotRegex(code, r"--setup-key[ =]")
+        self.assertIn("--setup-key-file", code)
+        for msg in re.findall(r'log "[^"]*"', code):
+            self.assertNotRegex(msg, r"\$\{?key\b")
+        self.assertIn("unset NB_SETUP_KEY", code)
+
+
+class NetbirdShell(unittest.TestCase):
+    """Runs netbird-join.sh against a fake netbird."""
+
+    KEY = "FAKE-SETUP-KEY-0123456789abcdef"
+    FAKE = """#!/usr/bin/env bash
+printf '%s\\n' "$*" >>"$NB_LOG"
+env | grep -c '^NB_SETUP_KEY=' >>"$NB_LOG" || true
+all="$*"
+case " $all " in
+  *" service run "*)
+    sock=${all#*--daemon-addr unix://}; sock=${sock%% *}
+    python3 -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); time.sleep(2)' "$sock" ;;
+  *" up "*)
+    f=${all#*--setup-key-file }; f=${f%% *}
+    cat "$f" >"$NB_SEEN_KEY"
+    ls -l "$f" | cut -c1-10 >"$NB_SEEN_MODE"
+    [[ ${NB_FAIL:-} == 1 ]] && { echo "login failed" >&2; exit 1; }
+    exit 0 ;;
+esac
+"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        nb = self.bin / "netbird"
+        nb.write_text(self.FAKE)
+        nb.chmod(0o755)
+        self.log = self.tmp / "log"
+
+    def run_join(self, args=(), fail=False, **env):
+        e = {"PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(self.tmp / "home"),
+             "AGENTBOX_RUNTIME_DIR": str(self.tmp / "rt"), "NB_LOG": str(self.log),
+             "NB_SEEN_KEY": str(self.tmp / "seen"), "NB_SEEN_MODE": str(self.tmp / "mode"),
+             "NB_SETUP_KEY_FILE": str(self.tmp / "nokey"), "NB_UP_TIMEOUT": "10"}
+        if fail:
+            e["NB_FAIL"] = "1"
+        e.update(env)
+        p = subprocess.run(["bash", str(NETBIRD_JOIN), *args], env=e, capture_output=True,
+                           text=True, timeout=60)
+        self.assertNotIn(self.KEY, p.stdout + p.stderr)
+        self.assertTrue(all(l.startswith("agentbox: netbird") for l in p.stdout.splitlines()), p.stdout)
+        return p
+
+    def test_without_a_key_it_is_off_and_starts_nothing(self):
+        p = self.run_join()
+        self.assertEqual(p.returncode, 0)
+        self.assertIn("off: no setup key", p.stdout)
+        self.assertFalse(self.log.exists())
+
+    def test_an_unknown_mode_is_off(self):
+        p = self.run_join(["bogus"], NB_SETUP_KEY=self.KEY)
+        self.assertEqual(p.returncode, 0)
+        self.assertFalse(self.log.exists())
+
+    def test_kernel_mode_without_root_does_not_join(self):
+        if os.geteuid() == 0:
+            self.skipTest("running as root")
+        p = self.run_join(["kernel"], NB_SETUP_KEY=self.KEY)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("kernel mode needs root", p.stdout)
+        self.assertFalse(self.log.exists())
+
+    def test_a_key_in_the_environment_joins_in_netstack_mode_via_a_0600_file(self):
+        p = self.run_join(NB_SETUP_KEY=self.KEY)
+        self.assertEqual(p.returncode, 1)  # the fake daemon exits after 2 s, which the script reports
+        log = self.log.read_text()
+        self.assertIn("up --management-url https://netbird.apj.dev --hostname agentbox", log)
+        self.assertIn("--block-inbound --disable-dns --disable-firewall --disable-server-routes", log)
+        self.assertNotIn(self.KEY, log)  # not on argv
+        self.assertEqual((self.tmp / "seen").read_text(), self.KEY)
+        self.assertEqual((self.tmp / "mode").read_text().strip(), "-rw-------")
+        self.assertIn("joined https://netbird.apj.dev as agentbox (netstack", p.stdout)
+        self.assertFalse((self.tmp / "rt" / "netbird-setup-key").exists())
+
+    def test_a_mounted_key_file_works_and_the_daemon_never_sees_the_key_in_its_env(self):
+        key = self.tmp / "key"
+        key.write_text(self.KEY + "\n")
+        p = self.run_join(NB_SETUP_KEY_FILE=str(key))
+        self.assertIn("joined", p.stdout)
+        self.assertEqual((self.tmp / "seen").read_text(), self.KEY)
+        # every fake invocation logs how many NB_SETUP_KEY variables it inherited
+        self.assertEqual({l for l in self.log.read_text().splitlines() if l.isdigit()}, {"0"})
+
+    def test_a_failed_join_is_logged_without_the_key_and_leaves_no_file(self):
+        p = self.run_join(fail=True, NB_SETUP_KEY=self.KEY)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("WARNING join failed: login failed", p.stdout)
+        self.assertFalse((self.tmp / "rt" / "netbird-setup-key").exists())
+
+
+class NetbirdEntrypoint(unittest.TestCase):
+    def run_setup(self, **env):
+        e = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"}
+        e.update(env)
+        script = 'source "$1"; nb_key=${NB_SETUP_KEY:-}; unset NB_SETUP_KEY; setup_netbird; wait; echo "env:[${NB_SETUP_KEY:-}]"'
+        p = subprocess.run(["bash", "-c", script, "bash", str(ENTRYPOINT)], env=e,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout
+
+    def test_off_switch_and_no_key_start_nothing_and_never_fail(self):
+        self.assertIn("netbird: off", self.run_setup(AGENTBOX_NETBIRD="off", NB_SETUP_KEY="x" * 40))
+        out = self.run_setup(AGENTBOX_LIB=str(ROOT), NB_SETUP_KEY_FILE="/nonexistent")
+        self.assertIn("agentbox: netbird off: no setup key", out)
+        self.assertIn("env:[]", out)
+
+    def test_the_key_is_not_in_the_entrypoints_environment(self):
+        out = self.run_setup(AGENTBOX_LIB=str(ROOT), NB_SETUP_KEY="k" * 40, NB_MODE="bogus")
+        self.assertIn("env:[]", out)
+        self.assertNotIn("k" * 40, out)
+
+
 # --- sshd for the PC's herdr (homelab-gitops docs/agentbox.md §herdr machine) -----------
 # tests/test_sshd_config.py pins sshd_config itself; these pin how the image and the
 # entrypoint use it. homelab-gitops tests the workload, RBAC and port-forward side.
