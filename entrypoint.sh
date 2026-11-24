@@ -22,6 +22,10 @@
 #   2a'. fj (forgejo-cli): the mounted Forgejo API token is loaded into fj's login for
 #      git.apj.dev, so `fj pr status` etc. work (see AGENTBOX_FORGEJO_TOKEN_FILE below).
 #      `fj-reauth` reruns this step after the 1Password item is rotated.
+#   2a''. NetBird (optional, off unless a setup key is mounted): netbird-join.sh joins
+#      the overlay in userspace (netstack) mode, in the background, so agents can reach
+#      the Hetzner prod-k3s cluster through a SOCKS5 proxy on 127.0.0.1:1080 (README
+#      §NetBird). Needs no root and no capability. A failed join is logged and ignored.
 #   2b. sshd, for the PC's herdr (`herdr machine add agentbox`, docs/agentbox.md
 #      §herdr machine): as this user, on 127.0.0.1:2222 only, with
 #      /etc/agentbox/sshd_config. Its ed25519 host key is generated once on the
@@ -87,6 +91,14 @@
 #                             argv or the log). Absent or empty: fj is untouched and one line is
 #                             logged. The token is not checked against the API here.
 #   AGENTBOX_FORGEJO_HOST     the instance fj logs in to (git.apj.dev)
+#   NB_SETUP_KEY_FILE         NetBird setup key (/run/secrets/agentbox/netbird/setup-key, the Secret
+#                             agentbox-netbird-setup-key from 1Password). NB_SETUP_KEY holds it
+#                             inline instead; this script drops it from its own environment at the
+#                             start, so herdr, panes and agents never inherit it. Neither present:
+#                             NetBird is off (one line logged). Never on argv, never logged.
+#   NB_MANAGEMENT_URL, NB_HOSTNAME, NB_SOCKS5_PORT, NB_STATE_DIR, NB_MODE  see netbird-join.sh
+#                             (https://netbird.apj.dev, agentbox, 1080, home volume, netstack)
+#   AGENTBOX_NETBIRD          off: never start NetBird, key or not (default on)
 #   AGENTBOX_SSHD_CONFIG      sshd's config (/etc/agentbox/sshd_config, in the image)
 #   AGENTBOX_SSHD_DIR         sshd's host key, on the home volume ($HOME/.config/agentbox/sshd)
 #   AGENTBOX_SSH_AUTHORIZED_KEYS  the mounted public key(s) sshd accepts; only checked here
@@ -162,7 +174,7 @@ export AGENTBOX_HERDR_SESSION AGENTBOX_MAX_LIVE_AGENTS AGENTBOX_PRUNE_MANIFEST
 # background subshell (so SIGTERM is handled at once, not after a 90 s agent start).
 HERD_PANES=$AGENTBOX_RUNTIME_DIR/herd-panes
 
-herdr_pid="" tetherd_pid="" sshd_sup_pid="" tail_pid="" resume_pid="" stopping=0
+herdr_pid="" tetherd_pid="" sshd_sup_pid="" netbird_pid="" nb_key="" tail_pid="" resume_pid="" stopping=0
 
 log() { printf 'agentbox: %s\n' "$*"; }
 
@@ -289,6 +301,18 @@ setup_browser_mcp() {
   else
     log "browser: WARNING could not register the playwright MCP server"
   fi
+}
+
+# --- 1e. netbird ----------------------------------------------------------------------
+# Optional and never fatal. netbird-join.sh runs in the background (a join can take a
+# minute), in userspace mode, and logs its own "agentbox: netbird ..." lines. The key was
+# lifted out of the environment at the top of main, so it reaches only that one process.
+setup_netbird() {
+  if [[ ${AGENTBOX_NETBIRD:-on} == off ]]; then log "netbird: off (AGENTBOX_NETBIRD=off)"; return 0; fi
+  if [[ ! -x $AGENTBOX_LIB/netbird-join.sh ]]; then log "netbird: $AGENTBOX_LIB/netbird-join.sh missing; skipped"; return 0; fi
+  NB_SETUP_KEY=$nb_key NB_MODE=${NB_MODE:-netstack} "$AGENTBOX_LIB/netbird-join.sh" </dev/null &
+  netbird_pid=$!
+  nb_key=""
 }
 
 # --- 2. tetherd ----------------------------------------------------------------------
@@ -606,10 +630,11 @@ shutdown() {  # [exit code]
   # sshd first: a herdr client on the PC then sees a closed connection, not a
   # server going away under it. Open sessions end with the herdr server below.
   if [[ -n $sshd_sup_pid ]]; then kill -TERM "$sshd_sup_pid" 2>/dev/null || true; fi
+  if [[ -n $netbird_pid ]]; then kill -TERM "$netbird_pid" 2>/dev/null || true; fi
   if [[ -n $tetherd_pid ]]; then kill -TERM "$tetherd_pid" 2>/dev/null || true; fi
   if [[ -n $herdr_pid ]]; then herdr server stop >/dev/null 2>&1 || kill -TERM "$herdr_pid" 2>/dev/null || true; fi
 
-  for p in $sshd_sup_pid $tetherd_pid $herdr_pid; do
+  for p in $sshd_sup_pid $netbird_pid $tetherd_pid $herdr_pid; do
     while kill -0 "$p" 2>/dev/null && ((SECONDS < deadline)); do sleep 1; done
     if kill -0 "$p" 2>/dev/null; then log "shutdown: pid $p still running, killing it"; kill -KILL "$p" 2>/dev/null || true; fi
   done
@@ -626,11 +651,15 @@ main() {
   tail -n0 -F "$AGENTBOX_EVENTS" 2>/dev/null &
   tail_pid=$!
 
+  # herdr and every pane inherit this environment, so the NetBird setup key leaves it now.
+  nb_key=${NB_SETUP_KEY:-}
+  unset NB_SETUP_KEY
   prune_sessions
   start_herdr || exit 1
   setup_git_ssh || true
   setup_forgejo_cli || true
   setup_browser_mcp || true
+  setup_netbird || true
   start_tetherd
   start_sshd
   log "herdr Mobile Relay: not run in the pod (docs/agentbox.md, relay-in-pod)"
