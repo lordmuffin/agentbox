@@ -51,6 +51,24 @@ The pod has no display and no user namespaces, so Chromium always runs headless 
 - A site behind a private CA needs `AGENTBOX_BROWSER_IGNORE_HTTPS_ERRORS=1`; the MCP server picks
   it up at the next start. Headed mode needs a display and is not supported.
 
+## Tether Browser pane
+
+tetherd's Browser pane (tether `docs/host-browser.md`) runs the same Chromium: the PWA's 🌐
+button shows a headless Chromium on agentbox, so you can sign in to Forgejo or GitHub once and
+open a repo's branch or compare page beside its agent. The entrypoint gives tetherd, and only
+tetherd (agents' shells don't inherit them):
+
+| Setting | Default | Why |
+|---|---|---|
+| `TETHER_BROWSER_BIN` | `$AGENTBOX_CHROMIUM` (`/usr/bin/chromium`) | tetherd would find `chromium` on `PATH` anyway; this pins it to the binary the Playwright tools use. |
+| `TETHER_BROWSER_NO_SANDBOX` | `true` | The pod has no user namespaces, so a sandboxed Chromium exits with "No usable sandbox!". Without the sandbox a renderer exploit runs as `agent`; the pod is the boundary (tether `docs/host-browser.md` §Containers). |
+| `TETHER_FORGE_WEB` | `git-ssh.apj.dev=https://git.apj.dev` | Origins are `ssh://git@git-ssh.apj.dev/...`; their web pages, and the URL bar's `auto` allow-list, are on `git.apj.dev`. |
+
+Set any of them on the StatefulSet to override; `TETHER_BROWSER=off` turns the pane off.
+`tetherd doctor`'s `browser` line shows the Chromium version and the profile
+(`~/.tether/browser/profile`, on the PVC, so sign-ins survive a restart). The pane needs a
+signed-in login (the SSO proxy listener or the app's sign-in), not just a NetBird peer.
+
 ## NetBird (prod-k3s access)
 
 The image carries the NetBird client (0.81.3, sha256-checked in the `Dockerfile`) and
