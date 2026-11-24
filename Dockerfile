@@ -144,8 +144,9 @@ ARG PLAYWRIGHT_MCP_VERSION=0.0.84
 # here (homelab-gitops tests/tdd, tests/test_image.py): the pod has no PyPI egress.
 # python3-venv, python3-pip and xz-utils are what `make deps` / `make tools` need; the
 # testenv stage bakes the wheelhouse they install from. chromium and the two font packages
-# are for agents testing web apps (README §Browser testing): without fonts pages render
-# boxes and screenshots are useless.
+# are for agents testing web apps (README §Browser testing) and for tetherd's Browser pane
+# (README §Tether Browser pane; tetherd finds `chromium` on PATH): without fonts pages
+# render boxes and screenshots are useless.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       bash bsdextrautils ca-certificates chromium curl fonts-liberation fonts-noto-color-emoji \

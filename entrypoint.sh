@@ -135,6 +135,9 @@
 #   AGENTBOX_BROWSER_MCP      0 skips registering the Playwright MCP server with claude (default 1).
 #   AGENTBOX_BROWSER_IGNORE_HTTPS_ERRORS  1: the MCP server and `agentbox-browser` accept
 #                             certificates from a private CA (Chromium doesn't read the system store).
+#   TETHER_BROWSER_BIN        tetherd's Browser pane Chromium (AGENTBOX_CHROMIUM, /usr/bin/chromium)
+#   TETHER_BROWSER_NO_SANDBOX (true: the pod has no user namespaces; tether docs/host-browser.md §Containers)
+#   TETHER_FORGE_WEB          (git-ssh.apj.dev=https://git.apj.dev, for Open on Forgejo and the pane's allow-list)
 #   TETHER_ALLOWED_USERS etc. any other TETHER_* setting is passed through to tetherd as is.
 set -euo pipefail
 
@@ -469,6 +472,13 @@ start_tetherd() {
     unset TETHER_PROXY_ADDR
     log "tetherd proxy listener off: needs POD_IP and a PEM certificate in $TETHER_PROXY_CLIENT_CA"
   fi
+  # The Browser pane (tether docs/host-browser.md): the image's Chromium, without its
+  # sandbox because the pod has no user namespaces (§Containers; the pod is the boundary).
+  # Here, not at the top, so only tetherd gets them and agents' shells don't.
+  export TETHER_BROWSER_BIN=${TETHER_BROWSER_BIN:-${AGENTBOX_CHROMIUM:-/usr/bin/chromium}}
+  export TETHER_BROWSER_NO_SANDBOX=${TETHER_BROWSER_NO_SANDBOX:-true}
+  # Origins are ssh://git@git-ssh.apj.dev/..., whose web pages are on git.apj.dev.
+  export TETHER_FORGE_WEB=${TETHER_FORGE_WEB:-git-ssh.apj.dev=https://git.apj.dev}
   tetherd serve </dev/null &
   tetherd_pid=$!
   log "tetherd started (pid $tetherd_pid, proxy ${TETHER_PROXY_ADDR:-off})"

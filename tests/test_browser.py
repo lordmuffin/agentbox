@@ -155,5 +155,59 @@ class BrowserMcpShell(unittest.TestCase):
         self.assertIn("  setup_browser_mcp || true\n", ENTRYPOINT.read_text())
 
 
+class TetherBrowserShell(unittest.TestCase):
+    """Sources entrypoint.sh and runs start_tetherd against a fake tetherd that records its env:
+    the Browser pane (tether docs/host-browser.md) gets the image's Chromium, unsandboxed."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        self.run_dir = self.tmp / "run"
+        self.run_dir.mkdir(mode=0o700)
+        self.hmac = self.tmp / "hmac"
+        self.hmac.write_text("h" * 64 + "\n")
+        self.env_out = self.tmp / "tetherd.env"
+        tetherd = self.bin / "tetherd"
+        tetherd.write_text('#!/usr/bin/env bash\nenv | grep "^TETHER_BROWSER\\|^TETHER_FORGE" | sort >"$ENV_OUT"\n')
+        tetherd.chmod(0o755)
+
+    def start(self, **env):
+        """Run start_tetherd; return (tetherd's TETHER_BROWSER*/FORGE* env, the sourcing shell's after)."""
+        e = {"PATH": f"{self.bin}:/usr/bin:/bin", "HOME": str(self.tmp), "ENV_OUT": str(self.env_out),
+             "AGENTBOX_RUNTIME_DIR": str(self.run_dir), "AGENTBOX_HMAC_KEY_FILE": str(self.hmac),
+             "AGENTBOX_VAPID_KEY_FILE": str(self.tmp / "none"), **env}
+        script = ('source "$1" && start_tetherd >/dev/null && wait "$tetherd_pid" '
+                  '&& env | grep "^TETHER_BROWSER\\|^TETHER_FORGE" | sort || true')
+        p = subprocess.run(["bash", "-c", script, "bash", str(ENTRYPOINT)],
+                           env=e, capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        parse = lambda text: dict(l.split("=", 1) for l in text.splitlines() if "=" in l)
+        return parse(self.env_out.read_text()), parse(p.stdout)
+
+    def test_tetherd_gets_the_image_chromium_without_the_sandbox(self):
+        got, _ = self.start()
+        self.assertEqual(got, {"TETHER_BROWSER_BIN": "/usr/bin/chromium",
+                               "TETHER_BROWSER_NO_SANDBOX": "true",
+                               "TETHER_FORGE_WEB": "git-ssh.apj.dev=https://git.apj.dev"})
+
+    def test_settings_from_the_pod_win(self):
+        got, _ = self.start(AGENTBOX_CHROMIUM="/opt/c", TETHER_BROWSER_NO_SANDBOX="false",
+                            TETHER_FORGE_WEB="x=https://y")
+        self.assertEqual(got["TETHER_BROWSER_BIN"], "/opt/c")
+        self.assertEqual(got["TETHER_BROWSER_NO_SANDBOX"], "false")
+        self.assertEqual(got["TETHER_FORGE_WEB"], "x=https://y")
+        got, _ = self.start(TETHER_BROWSER_BIN="/opt/other", AGENTBOX_CHROMIUM="/opt/c")
+        self.assertEqual(got["TETHER_BROWSER_BIN"], "/opt/other")
+
+    def test_not_set_at_the_top_so_herdr_and_agents_dont_inherit_them(self):
+        text = ENTRYPOINT.read_text()
+        start = text[text.index("start_tetherd() {"):text.index("\n}\n", text.index("start_tetherd() {"))]
+        for var in ("TETHER_BROWSER_BIN", "TETHER_BROWSER_NO_SANDBOX", "TETHER_FORGE_WEB"):
+            self.assertIn(f"export {var}=", start)
+            self.assertEqual(text.count(f"export {var}="), 1, var)
+
+
 if __name__ == "__main__":
     unittest.main()
