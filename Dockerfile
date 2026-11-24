@@ -69,6 +69,7 @@ ENV PATH=/usr/local/go/bin:/opt/node/bin:$PATH \
 # or the GitHub build fails with "repository not found".
 FROM toolchains AS sources
 ARG TETHER_REF=e1fae5dd6580a44942cf835d9eace8a51e825f6d
+ARG HERD_REF=153051cb802de27a1fe0f18597e98fbe1c5a6b8e
 ARG SOURCE_BASE=https://git.apj.dev/lordmuffin
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git make \
