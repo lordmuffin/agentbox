@@ -68,7 +68,7 @@ ENV PATH=/usr/local/go/bin:/opt/node/bin:$PATH \
 # A repo cloned here must exist as a GitHub mirror and be in that token's Contents: read list,
 # or the GitHub build fails with "repository not found".
 FROM toolchains AS sources
-ARG TETHER_REF=cbf7a1c2d6f8759de0935a6270480773984bd3a3
+ARG TETHER_REF=7099e33c81eeecec45f32d220230d9c6f5e98764
 ARG HERD_REF=153051cb802de27a1fe0f18597e98fbe1c5a6b8e
 ARG SOURCE_BASE=https://git.apj.dev/lordmuffin
 RUN apt-get update \
