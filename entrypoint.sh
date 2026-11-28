@@ -132,6 +132,11 @@
 #   TETHER_HUB_URL, TETHER_HUB_SECRET_FILE, TETHER_SATELLITE_NAME  satellite federation (unset:
 #                             not a satellite). The secret gets a 0600 copy; without the URL or
 #                             a usable secret all satellite settings are unset (logged).
+#   TETHER_TSF, TETHER_INGRESS_SECRET_FILE, TETHER_TSF_CLASSIFIER_KEY_FILE  the ticket-to-merge
+#                             pipeline (tether docs/tsf.md; unset: off). Both files get 0600
+#                             copies. No webhook secret: TETHER_TSF is unset (off, logged). No
+#                             classifier key: TETHER_TSF_CLASSIFIER_URL is unset too (logged), so
+#                             tetherd acts on no event. The other TETHER_TSF_* pass through.
 #   AGENTBOX_BROWSER_MCP      0 skips registering the Playwright MCP server with claude (default 1).
 #   AGENTBOX_BROWSER_IGNORE_HTTPS_ERRORS  1: the MCP server and `agentbox-browser` accept
 #                             certificates from a private CA (Chromium doesn't read the system store).
@@ -426,6 +431,32 @@ multi_tenancy() {
   log "tetherd multi-tenancy on (computers dir $TETHER_COMPUTERS_DIR)"
 }
 
+# Ticket-to-merge pipeline (TETHER_TSF, tether docs/tsf.md). tetherd exits when
+# --ingress-secret-file or --tsf-classifier-key-file is group-readable, and both mounts
+# are 0440 (fsGroup), so each gets a 0600 private copy. Missing pieces fail closed and
+# never stop tetherd: no webhook secret turns the pipeline off, no classifier key turns
+# the classifier off (tetherd then acts on no event). Secrets are never logged.
+tsf_secrets() {
+  [[ ${TETHER_TSF:-} =~ ^(1|t|T|true|TRUE|True)$ ]] || return 0
+  local copy classifier=off
+  if copy=$(private_copy "${TETHER_INGRESS_SECRET_FILE:-}" tsf-ingress.secret); then
+    export TETHER_INGRESS_SECRET_FILE=$copy
+  else
+    log "tetherd tsf off: no webhook secret at ${TETHER_INGRESS_SECRET_FILE:-(TETHER_INGRESS_SECRET_FILE unset)}"
+    unset TETHER_TSF TETHER_INGRESS_SECRET_FILE; return 0
+  fi
+  if [[ -n ${TETHER_TSF_CLASSIFIER_KEY_FILE:-} ]]; then
+    if copy=$(private_copy "$TETHER_TSF_CLASSIFIER_KEY_FILE" tsf-classifier.key); then
+      export TETHER_TSF_CLASSIFIER_KEY_FILE=$copy
+    else
+      log "tetherd tsf classifier off: no key at $TETHER_TSF_CLASSIFIER_KEY_FILE (no event is acted on)"
+      unset TETHER_TSF_CLASSIFIER_URL TETHER_TSF_CLASSIFIER_KEY_FILE
+    fi
+  fi
+  [[ -n ${TETHER_TSF_CLASSIFIER_URL:-} ]] && classifier=on
+  log "tetherd tsf on (classifier $classifier)"
+}
+
 start_tetherd() {
   local hmac vapid
   if ! hmac=$(private_copy "$AGENTBOX_HMAC_KEY_FILE" tether-hmac.key); then
@@ -434,6 +465,7 @@ start_tetherd() {
   export TETHER_HMAC_SECRET_FILE=$hmac
   federation_secrets
   multi_tenancy
+  tsf_secrets
   # Web Push's VAPID key. The mounted secret is 0400/0440, so it gets a private copy.
   if vapid=$(private_copy "$AGENTBOX_VAPID_KEY_FILE" vapid.key); then
     export TETHER_WEBPUSH_KEY=$vapid

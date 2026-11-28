@@ -304,6 +304,87 @@ class FederationShell(unittest.TestCase):
         self.assertEqual(self.federate(), ([], {}))
 
 
+class TsfShell(unittest.TestCase):
+    """Sources entrypoint.sh and runs tsf_secrets (tether docs/tsf.md): 0600 copies, fail closed."""
+
+    def setUp(self):
+        if 'if [[ ${BASH_SOURCE[0]} == "$0" ]]; then main "$@"; fi' not in ENTRYPOINT.read_text():
+            self.fail("entrypoint.sh runs main when sourced; not sourcing it")
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.run_dir = self.tmp / "run"
+        self.run_dir.mkdir(mode=0o700)
+        (self.tmp / "mnt").mkdir()
+        self.ingress = self.tmp / "mnt" / "ingress"
+        self.ingress.write_text("i" * 64 + "\n")
+        self.ingress.chmod(0o440)
+        self.key = self.tmp / "mnt" / "litellm"
+        self.key.write_text("sk-" + "k" * 40 + "\n")
+        self.key.chmod(0o440)
+        self.url = "https://litellm.example"
+
+    def run_tsf(self, **env):
+        script = 'source "$1" && tsf_secrets && env | grep "^TETHER_" || true'
+        base = {"PATH": os.environ["PATH"], "HOME": str(self.tmp), "AGENTBOX_RUNTIME_DIR": str(self.run_dir)}
+        p = subprocess.run(["bash", "-c", script, "bash", str(ENTRYPOINT)],
+                           env={**base, **env}, capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stderr, "")
+        self.assertNotIn("i" * 32, p.stdout)
+        self.assertNotIn("k" * 32, p.stdout)
+        logs = [l for l in p.stdout.splitlines() if l.startswith("agentbox: ")]
+        out = dict(l.split("=", 1) for l in p.stdout.splitlines() if l.startswith("TETHER_"))
+        return logs, {k: v for k, v in out.items() if k not in ("TETHER_PROXY_CLIENT_CA", "TETHER_APPROVAL_TIMEOUT",
+                                                                "TETHER_LOKI_URL")}
+
+    def test_start_tetherd_runs_it_before_tetherd(self):
+        start = ENTRYPOINT.read_text().split("start_tetherd() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertLess(start.index("tsf_secrets"), start.index("tetherd serve"))
+
+    def test_both_secrets_become_0600_copies(self):
+        logs, out = self.run_tsf(TETHER_TSF="1", TETHER_INGRESS_SECRET_FILE=str(self.ingress),
+                                 TETHER_TSF_CLASSIFIER_URL=self.url, TETHER_TSF_CLASSIFIER_KEY_FILE=str(self.key),
+                                 TETHER_TSF_REPOS="o/n=/r")
+        ing, key = self.run_dir / "tsf-ingress.secret", self.run_dir / "tsf-classifier.key"
+        self.assertEqual(out, {"TETHER_TSF": "1", "TETHER_INGRESS_SECRET_FILE": str(ing), "TETHER_TSF_CLASSIFIER_URL": self.url,
+                               "TETHER_TSF_CLASSIFIER_KEY_FILE": str(key), "TETHER_TSF_REPOS": "o/n=/r"})
+        for copy, src in ((ing, self.ingress), (key, self.key)):
+            self.assertEqual(stat.S_IMODE(copy.stat().st_mode), 0o600)
+            self.assertEqual(copy.read_text(), src.read_text())
+        self.assertEqual(logs, ["agentbox: tetherd tsf on (classifier on)"])
+
+    def test_no_webhook_secret_turns_tsf_off(self):
+        for path in (f"{self.tmp}/mnt/nope", None):
+            with self.subTest(path=path):
+                env = {"TETHER_TSF": "true", "TETHER_TSF_CLASSIFIER_URL": self.url}
+                if path:
+                    env["TETHER_INGRESS_SECRET_FILE"] = path
+                logs, out = self.run_tsf(**env)
+                self.assertNotIn("TETHER_TSF", out)
+                self.assertNotIn("TETHER_INGRESS_SECRET_FILE", out)
+                self.assertEqual(len(logs), 1)
+                self.assertIn("tetherd tsf off: no webhook secret", logs[0])
+                self.assertEqual(list(self.run_dir.iterdir()), [])
+
+    def test_no_classifier_key_turns_the_classifier_off(self):
+        logs, out = self.run_tsf(TETHER_TSF="1", TETHER_INGRESS_SECRET_FILE=str(self.ingress),
+                                 TETHER_TSF_CLASSIFIER_URL=self.url, TETHER_TSF_CLASSIFIER_KEY_FILE=f"{self.tmp}/mnt/nope")
+        self.assertEqual(set(out), {"TETHER_TSF", "TETHER_INGRESS_SECRET_FILE"})
+        self.assertIn("tetherd tsf classifier off", logs[0])
+        self.assertEqual(logs[-1], "agentbox: tetherd tsf on (classifier off)")
+
+    def test_tsf_off_touches_nothing(self):
+        for v in (None, "0", "false"):
+            with self.subTest(v=v):
+                env = {"TETHER_INGRESS_SECRET_FILE": str(self.ingress)}
+                if v is not None:
+                    env["TETHER_TSF"] = v
+                logs, out = self.run_tsf(**env)
+                self.assertEqual(logs, [])
+                self.assertEqual(out["TETHER_INGRESS_SECRET_FILE"], str(self.ingress))
+                self.assertEqual(list(self.run_dir.iterdir()), [])
+
+
 class ForgejoCliShell(unittest.TestCase):
     """Sources entrypoint.sh and runs setup_forgejo_cli against a fake fj."""
 
